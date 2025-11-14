@@ -1,0 +1,105 @@
+# 📘 NovelGen — 基于 LangChain 的 AI 小说生成器
+
+NovelGen 是一个 从零开始构建 AI 自动写小说的项目，目标不仅是生成完整小说，更是用于 学习 LangChain、AI 架构设计、LLM 提示工程。
+
+本项目将小说创作过程拆解为多个结构化步骤：
+从世界观 → 角色 → 梗概 → 大纲 → 场景 → 正文，全流程全部由 AI 自动生成，并支持记忆、修订。
+
+## ✨ 项目亮点
+
+📚 完整的小说生成工作流
+
+🧱 严格结构化的输出（Pydantic + JSON）
+
+⚙️ 全流程基于 LangChain 构建，可拓展性强
+
+🔁 支持章节摘要、全书摘要、场景级生成
+
+🔍 内置“文本自检”，避免设定冲突
+
+🧩 模块化设计，可按需替换链路
+
+🔧 非常适合学习 LangChain：Runnable、PromptTemplate、Structured Output、VectorStore（可选）
+
+## 🧩 项目目录结构
+```
+novelgen/
+  novelgen/
+    config.py             # settings.json 加载 & 校验
+    models.py             # 所有数据结构(Pydantic)
+    llm.py                # LangChain LLM 初始化
+    chains/
+      world_chain.py
+      theme_conflict_chain.py
+      characters_chain.py
+      outline_chain.py
+      chapters_plan_chain.py
+      scene_text_chain.py
+    runtime/
+      orchestrator.py     # 主流程调度
+      summary.py          # 章节/全书摘要
+      revision.py         # 修订机制
+  projects/
+    demo_001/
+      settings.json
+      world.json
+      characters.json
+      outline.json
+      chapters_plan.json
+      chapters/
+        ch01.json
+        ch01.md
+```
+
+## 🚀 开发目标（MVP 阶段）
+
+能从 settings.json → world.json
+
+能从 world → characters
+
+能从 characters → outline
+
+能生成章节计划（chapters_plan.json）
+
+能生成至少 1–2 章正文（简单版，不含自检）
+
+### 📦 安装
+
+#### 1. 安装依赖
+```bash
+pip install -r requirements.txt
+```
+
+或者使用 uv：
+
+```bash
+uv sync
+```
+
+#### 2. 配置环境变量
+
+**手动设置：**
+```bash
+# 复制环境变量模板
+cp .env.template .env
+
+# 编辑 .env 文件，填入你的 OpenAI API Key
+# OPENAI_API_KEY=sk-your-actual-api-key-here
+```
+
+详细的环境配置说明请参考 [ENV_SETUP.md](ENV_SETUP.md)。
+
+## ▶️ 运行示例
+python -m novelgen.runtime.orchestrator \
+  --project projects/demo_001 \
+  --steps world,characters,outline,chapters_plan,chapters
+
+## 🧠 后续计划（中长篇扩展）
+
+章节摘要 + 全书摘要
+
+VectorStore + 上下文检索
+
+自检链：一致性、称谓、角色、世界观规则
+
+修订机制（局部修改 → 自动影响范围）
