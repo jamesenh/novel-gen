@@ -82,6 +82,10 @@ class ScenePlan(BaseModel):
     purpose: str = Field(description="场景目的")
     key_actions: List[str] = Field(description="关键动作")
     estimated_words: int = Field(description="预计字数")
+    scene_type: str = Field(description="场景类型: 日常/对话/战斗/发展/高潮/结局")
+    intensity: str = Field(description="强度等级: 低/中/高")
+    developer_name: str = Field(default="Jamesenh")  # 开发者名字
+    developer_date: str = Field(default="2025-11-15")  # 开发时间
 
 
 class ChapterPlan(BaseModel):
