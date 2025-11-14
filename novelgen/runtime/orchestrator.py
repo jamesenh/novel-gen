@@ -18,6 +18,7 @@ from novelgen.chains.characters_chain import generate_characters
 from novelgen.chains.outline_chain import generate_outline
 from novelgen.chains.chapters_plan_chain import generate_chapter_plan
 from novelgen.chains.scene_text_chain import generate_scene_text
+from novelgen.runtime.exporter import export_chapter_to_txt, export_all_chapters_to_txt
 
 
 class NovelOrchestrator:
@@ -247,4 +248,44 @@ class NovelOrchestrator:
             self.step6_generate_chapter_text(chapter_num)
         
         print(f"\n🎉 全部{len(outline.chapters)}章已生成完毕！")
+    
+    def export_chapter(self, chapter_number: int, output_path: Optional[str] = None):
+        """
+        导出单个章节为txt文件
+        
+        Args:
+            chapter_number: 章节编号
+            output_path: 输出文件路径（可选）。如果不指定，默认保存到 chapters/chapter_XXX.txt
+        """
+        # 加载章节数据
+        chapter = self.load_chapter(chapter_number)
+        if not chapter:
+            raise ValueError(f"章节 {chapter_number} 不存在，请先生成章节")
+        
+        # 确定输出路径
+        if output_path is None:
+            output_path = os.path.join(
+                self.config.chapters_dir,
+                f"chapter_{chapter_number:03d}.txt"
+            )
+        
+        # 导出
+        export_chapter_to_txt(chapter, output_path)
+    
+    def export_all_chapters(self, output_path: Optional[str] = None):
+        """
+        导出所有章节为一个txt文件
+        
+        Args:
+            output_path: 输出文件路径（可选）。如果不指定，默认保存到项目根目录的 {project_name}_full.txt
+        """
+        # 确定输出路径
+        if output_path is None:
+            output_path = os.path.join(
+                self.project_dir,
+                f"{self.project_name}_full.txt"
+            )
+        
+        # 导出
+        export_all_chapters_to_txt(self.project_dir, output_path)
 

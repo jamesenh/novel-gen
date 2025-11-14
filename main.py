@@ -41,21 +41,26 @@ def demo_full_flow():
     print("="*60)
     outline = orchestrator.step4_create_outline(num_chapters=10)
     print(f"章节数: {len(outline.chapters)}")
-    
-    # 步骤5: 生成第一章计划
+
     print("\n" + "="*60)
-    print("步骤5: 生成章节计划")
+    print("步骤5: 生成所有章节文本")
     print("="*60)
-    chapter_plan = orchestrator.step5_create_chapter_plan(chapter_number=1)
-    print(f"第1章: {chapter_plan.chapter_title}")
-    print(f"场景数: {len(chapter_plan.scenes)}")
+    orchestrator.generate_all_chapters()
     
-    # 步骤6: 生成第一章文本
-    print("\n" + "="*60)
-    print("步骤6: 生成章节文本")
-    print("="*60)
-    chapter = orchestrator.step6_generate_chapter_text(chapter_number=1)
-    print(f"第1章完成，总字数: {chapter.total_words}")
+    # # 步骤5: 生成第一章计划
+    # print("\n" + "="*60)
+    # print("步骤5: 生成章节计划")
+    # print("="*60)
+    # chapter_plan = orchestrator.step5_create_chapter_plan(chapter_number=1)
+    # print(f"第1章: {chapter_plan.chapter_title}")
+    # print(f"场景数: {len(chapter_plan.scenes)}")
+    
+    # # 步骤6: 生成第一章文本
+    # print("\n" + "="*60)
+    # print("步骤6: 生成章节文本")
+    # print("="*60)
+    # chapter = orchestrator.step6_generate_chapter_text(chapter_number=1)
+    # print(f"第1章完成，总字数: {chapter.total_words}")
     
     print("\n" + "="*60)
     print("🎉 演示完成！")
@@ -85,7 +90,7 @@ def main():
     demo_full_flow()
     # demo_single_step()
     
-    print("请取消注释 main() 中的演示函数来运行示例")
+    # print("请取消注释 main() 中的演示函数来运行示例")
 
 def test_world_chain():
     """测试世界观生成链"""
@@ -117,5 +122,28 @@ def test_generate_chapter_text():
     orchestrator = NovelOrchestrator(project_name="test_world_chain", verbose=True)
     chapter = orchestrator.step6_generate_chapter_text(chapter_number=1)
 
+def export_chapter_cmd(project_name: str, chapter_number: int):
+    """
+    导出单个章节为txt文件
+    
+    Args:
+        project_name: 项目名称
+        chapter_number: 章节编号
+    """
+    orchestrator = NovelOrchestrator(project_name=project_name)
+    orchestrator.export_chapter(chapter_number)
+
+def export_novel_cmd(project_name: str):
+    """
+    导出整本小说为txt文件
+    
+    Args:
+        project_name: 项目名称
+    """
+    orchestrator = NovelOrchestrator(project_name=project_name)
+    orchestrator.export_all_chapters()
+
 if __name__ == "__main__":
-    test_generate_chapter_text()
+    # test_generate_chapter_text()
+    # main()
+    export_novel_cmd("demo_001")
