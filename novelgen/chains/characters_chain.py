@@ -2,24 +2,35 @@
 角色生成链
 基于世界观和主题冲突生成角色
 """
+from typing import Any
+
+
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from novelgen.models import CharactersConfig, WorldSetting, ThemeConflict
 from novelgen.llm import get_llm
+from novelgen.chains.output_fixing import LLMJsonRepairOutputParser
 
 
 def create_characters_chain(verbose: bool = False, llm_config=None):
     """创建角色生成链"""
-    parser = PydanticOutputParser[CharactersConfig](pydantic_object=CharactersConfig)
+    llm = get_llm(config=llm_config, verbose=verbose)
+    base_parser = PydanticOutputParser[CharactersConfig](pydantic_object=CharactersConfig)
+    parser = LLMJsonRepairOutputParser[CharactersConfig](parser=base_parser, llm=llm)
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", """你是一位专业的角色设计师。
 
-你的任务：基于世界观和主题冲突，设计小说的主要角色。
+你的任务：
+1. 基于世界观和主题冲突设计主角、反派及关键配角
+2. 给出支撑长篇叙事的动机、背景与关系网络
 
-输入说明：你会收到世界观设定JSON和主题冲突JSON
+输入说明：
+- 输入包含世界观JSON与主题冲突JSON
+- 必须保留输入中的设定约束
 
-输出格式：{format_instructions}
+输出格式（JSON schema）：
+{format_instructions}
 
 注意事项：
 1. 角色要立体、有深度
@@ -28,7 +39,7 @@ def create_characters_chain(verbose: bool = False, llm_config=None):
 4. 角色能力要符合世界观设定
 5. 主角和反派要形成对立统一
 6. 严格按照JSON格式输出，不要使用Markdown包裹
-7. 正文内容中不要使用双引号"""),
+7. 正文内容如需引用称谓或势力名称，统一使用「」或写成\"，严禁出现未转义的英文双引号"""),
         ("user", """世界观设定：
 {world_setting}
 
@@ -36,7 +47,6 @@ def create_characters_chain(verbose: bool = False, llm_config=None):
 {theme_conflict}""")
     ])
 
-    llm = get_llm(config=llm_config, verbose=verbose)
     chain = prompt | llm | parser
 
     return chain

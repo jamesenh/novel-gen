@@ -5,7 +5,7 @@
 import os
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union, List
 
 from novelgen.models import (
     WorldSetting, ThemeConflict, CharactersConfig,
@@ -206,56 +206,69 @@ class NovelOrchestrator:
         print(f"✅ 大纲已保存: {self.config.outline_file}")
         return outline
     
-    def step5_create_chapter_plan(self, chapter_number: int, force: bool = False) -> ChapterPlan:
+    def step5_create_chapter_plan(self, chapter_number: Union[int, List[int]], force: bool = False) -> Union[ChapterPlan, List[ChapterPlan]]:
         """
-        步骤5: 创建章节计划
-        
-        Args:
-            chapter_number: 章节编号
-            
-        Returns:
-            ChapterPlan对象
-        """
-        plan_file = os.path.join(
-            self.config.chapters_dir,
-            f"chapter_{chapter_number:03d}_plan.json"
-        )
-        existing = self._maybe_use_existing(
-            plan_file, ChapterPlan, force, f"第{chapter_number}章章节计划"
-        )
-        if existing:
-            return existing
+        步骤5: 创建章节计划（支持单个或多个章节）
 
-        print(f"📝 正在生成第{chapter_number}章的计划...")
+        Args:
+            chapter_number: 章节编号或章节编号列表
+            force: 是否强制重新生成，默认False
+
+        Returns:
+            单个ChapterPlan对象或ChapterPlan对象列表
+        """
+        # 统一处理为列表
+        chapter_numbers = [chapter_number] if isinstance(chapter_number, int) else chapter_number
+
+        # 加载共享数据
         world = self.load_json(self.config.world_file, WorldSetting)
         characters = self.load_json(self.config.characters_file, CharactersConfig)
         outline = self.load_json(self.config.outline_file, Outline)
-        
+
         if not all([world, characters, outline]):
             raise ValueError("缺少前置文件，请先执行前置步骤")
-        
-        # 找到对应章节
-        chapter_summary = None
-        for ch in outline.chapters:
-            if ch.chapter_number == chapter_number:
-                chapter_summary = ch
-                break
-        
-        if not chapter_summary:
-            raise ValueError(f"章节{chapter_number}不存在于大纲中")
-        
-        chapter_plan = generate_chapter_plan(
-            chapter_summary,
-            world,
-            characters,
-            verbose=self.verbose,
-            llm_config=self.config.chapters_plan_chain_config.llm_config
-        )
-        
-        # 保存章节计划
-        self.save_json(chapter_plan, plan_file)
-        print(f"✅ 章节计划已保存: {plan_file}")
-        return chapter_plan
+
+        results = []
+
+        for num in chapter_numbers:
+            plan_file = os.path.join(
+                self.config.chapters_dir,
+                f"chapter_{num:03d}_plan.json"
+            )
+            existing = self._maybe_use_existing(
+                plan_file, ChapterPlan, force, f"第{num}章章节计划"
+            )
+            if existing:
+                results.append(existing)
+                continue
+
+            print(f"📝 正在生成第{num}章的计划...")
+
+            # 找到对应章节
+            chapter_summary = None
+            for ch in outline.chapters:
+                if ch.chapter_number == num:
+                    chapter_summary = ch
+                    break
+
+            if not chapter_summary:
+                raise ValueError(f"章节{num}不存在于大纲中")
+
+            chapter_plan = generate_chapter_plan(
+                chapter_summary,
+                world,
+                characters,
+                verbose=self.verbose,
+                llm_config=self.config.chapters_plan_chain_config.llm_config
+            )
+
+            # 保存章节计划
+            self.save_json(chapter_plan, plan_file)
+            print(f"✅ 第{num}章计划已保存: {plan_file}")
+            results.append(chapter_plan)
+
+        # 根据输入类型返回结果
+        return results[0] if isinstance(chapter_number, int) else results
     
     def step6_generate_chapter_text(self, chapter_number: int) -> GeneratedChapter:
         """

@@ -49,11 +49,11 @@ def demo_full_flow():
     # print("="*60)
     # orchestrator.generate_all_chapters()
     
-    # # 步骤5: 生成第一章计划
-    # print("\n" + "="*60)
-    # print("步骤5: 生成章节计划")
-    # print("="*60)
-    # chapter_plan = orchestrator.step5_create_chapter_plan(chapter_number=1)
+    # 步骤5: 生成第一章计划
+    print("\n" + "="*60)
+    print("步骤5: 生成章节计划")
+    print("="*60)
+    chapter_plan = orchestrator.step5_create_chapter_plan(chapter_number=[1, 2, 3, 4])
     # print(f"第1章: {chapter_plan.chapter_title}")
     # print(f"场景数: {len(chapter_plan.scenes)}")
     
@@ -69,8 +69,8 @@ def demo_full_flow():
     print("="*60)
     print(f"项目文件已保存到: {orchestrator.project_dir}")
 
-    orchestrator.export_all_chapters()
-    print(f"小说已导出到: {orchestrator.project_dir}/demo_002_full.txt")
+    # orchestrator.export_all_chapters()
+    # print(f"小说已导出到: {orchestrator.project_dir}/demo_002_full.txt")
 
 def export_novel_cmd(project_name: str):
     """

@@ -6,11 +6,14 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from novelgen.models import GeneratedScene, ScenePlan, WorldSetting, CharactersConfig
 from novelgen.llm import get_llm
+from novelgen.chains.output_fixing import LLMJsonRepairOutputParser
 
 
 def create_scene_text_chain(verbose: bool = False, llm_config=None):
     """创建场景文本生成链"""
-    parser = PydanticOutputParser[GeneratedScene](pydantic_object=GeneratedScene)
+    llm = get_llm(config=llm_config, verbose=verbose)
+    base_parser = PydanticOutputParser[GeneratedScene](pydantic_object=GeneratedScene)
+    parser = LLMJsonRepairOutputParser[GeneratedScene](parser=base_parser, llm=llm)
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", """你是一位专业的小说作家，精通简体中文创作。
@@ -39,10 +42,12 @@ def create_scene_text_chain(verbose: bool = False, llm_config=None):
 - 同一人物多次出场时，变换描写角度和侧重点
 - 比喻和修辞要有新意，不要反复使用相同表达
 
-【输出格式】
+【输出格式（JSON schema）】
 {format_instructions}
 
-重要：必须严格按JSON格式输出，不要Markdown包裹，不要任何额外文字"""),
+重要：
+1. 必须严格按JSON格式输出，不要Markdown包裹，不要任何额外文字
+2. 正文字段禁止出现未转义的英文双引号，必要时使用「」或\""""),
         ("user", """【字数要求】
 目标字数：{scene_plan_obj.estimated_words} 字（中文字符数）
 可接受范围：{word_count_min} ~ {word_count_max} 字（±20%）
@@ -64,7 +69,6 @@ def create_scene_text_chain(verbose: bool = False, llm_config=None):
 {previous_summary}""")
     ])
 
-    llm = get_llm(config=llm_config, verbose=verbose)
     chain = prompt | llm | parser
 
     return chain
