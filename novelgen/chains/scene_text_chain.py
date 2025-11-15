@@ -8,10 +8,10 @@ from novelgen.models import GeneratedScene, ScenePlan, WorldSetting, CharactersC
 from novelgen.llm import get_llm
 
 
-def create_scene_text_chain(verbose: bool = False):
+def create_scene_text_chain(verbose: bool = False, llm_config=None):
     """创建场景文本生成链"""
     parser = PydanticOutputParser[GeneratedScene](pydantic_object=GeneratedScene)
-    
+
     prompt = ChatPromptTemplate.from_messages([
         ("system", """你是一位专业的小说作家，精通简体中文创作。
 
@@ -63,10 +63,10 @@ def create_scene_text_chain(verbose: bool = False):
 【前文概要】
 {previous_summary}""")
     ])
-    
-    llm = get_llm(verbose=verbose)
+
+    llm = get_llm(config=llm_config, verbose=verbose)
     chain = prompt | llm | parser
-    
+
     return chain
 
 
@@ -75,22 +75,24 @@ def generate_scene_text(
     world_setting: WorldSetting,
     characters: CharactersConfig,
     previous_summary: str = "",
-    verbose: bool = False
+    verbose: bool = False,
+    llm_config=None
 ) -> GeneratedScene:
     """
     生成场景文本
-    
+
     Args:
         scene_plan: 场景计划
         world_setting: 世界观设定
         characters: 角色配置
         previous_summary: 前文概要
         verbose: 是否输出详细日志（提示词、时间、token）
-        
+        llm_config: LLM配置
+
     Returns:
         GeneratedScene对象
     """
-    chain = create_scene_text_chain(verbose=verbose)
+    chain = create_scene_text_chain(verbose=verbose, llm_config=llm_config)
     parser = PydanticOutputParser[GeneratedScene](pydantic_object=GeneratedScene)
 
     # 计算字数范围

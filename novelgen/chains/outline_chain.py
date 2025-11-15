@@ -8,10 +8,10 @@ from novelgen.models import Outline, WorldSetting, ThemeConflict, CharactersConf
 from novelgen.llm import get_llm
 
 
-def create_outline_chain(verbose: bool = False):
+def create_outline_chain(verbose: bool = False, llm_config=None):
     """创建大纲生成链"""
     parser = PydanticOutputParser[Outline](pydantic_object=Outline)
-    
+
     prompt = ChatPromptTemplate.from_messages([
         ("system", """你是一位专业的故事大纲设计师。
 
@@ -39,10 +39,10 @@ def create_outline_chain(verbose: bool = False):
 
 预期章节数：{num_chapters}""")
     ])
-    
-    llm = get_llm(verbose=verbose)
+
+    llm = get_llm(config=llm_config, verbose=verbose)
     chain = prompt | llm | parser
-    
+
     return chain
 
 
@@ -51,24 +51,26 @@ def generate_outline(
     theme_conflict: ThemeConflict,
     characters: CharactersConfig,
     num_chapters: int = 20,
-    verbose: bool = False
+    verbose: bool = False,
+    llm_config=None
 ) -> Outline:
     """
     生成故事大纲
-    
+
     Args:
         world_setting: 世界观设定
         theme_conflict: 主题冲突
         characters: 角色配置
         num_chapters: 预期章节数
         verbose: 是否输出详细日志（提示词、时间、token）
-        
+        llm_config: LLM配置
+
     Returns:
         Outline对象
     """
-    chain = create_outline_chain(verbose=verbose)
+    chain = create_outline_chain(verbose=verbose, llm_config=llm_config)
     parser = PydanticOutputParser[Outline](pydantic_object=Outline)
-    
+
     result = chain.invoke({
         "world_setting": world_setting.model_dump_json(indent=2),
         "theme_conflict": theme_conflict.model_dump_json(indent=2),
@@ -76,6 +78,6 @@ def generate_outline(
         "num_chapters": num_chapters,
         "format_instructions": parser.get_format_instructions()
     })
-    
+
     return result
 

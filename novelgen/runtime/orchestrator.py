@@ -27,7 +27,7 @@ class NovelOrchestrator:
     def __init__(self, project_name: str, base_dir: str = "projects", verbose: bool = False):
         """
         初始化编排器
-        
+
         Args:
             project_name: 项目名称
             base_dir: 项目基础目录
@@ -37,7 +37,7 @@ class NovelOrchestrator:
         self.project_dir = os.path.join(base_dir, project_name)
         self.config = ProjectConfig(project_dir=self.project_dir)
         self.verbose = verbose
-        
+
         # 创建项目目录
         os.makedirs(self.project_dir, exist_ok=True)
         os.makedirs(self.config.chapters_dir, exist_ok=True)
@@ -61,63 +61,116 @@ class NovelOrchestrator:
         if model_class:
             return model_class(**data)
         return data
+
+    def _maybe_use_existing(self, filepath: str, model_class, force: bool, entity_name: str):
+        """
+        检查是否已有生成结果
+        force 为 False 时，若存在合法 JSON 则直接复用
+        """
+        if force:
+            return None
+        
+        if not os.path.exists(filepath):
+            return None
+        
+        try:
+            existing = self.load_json(filepath, model_class)
+        except Exception as exc:
+            print(f"⚠️ 已存在的{entity_name}无法解析，将重新生成。原因: {exc}")
+            return None
+        
+        if existing:
+            print(f"⏭️ 检测到{entity_name}已生成，跳过本次生成：{filepath}")
+        return existing
     
-    def step1_create_world(self, user_input: str) -> WorldSetting:
+    def step1_create_world(self, user_input: str, force: bool = False) -> WorldSetting:
         """
         步骤1: 创建世界观
-        
+
         Args:
             user_input: 用户输入的世界设定描述
-            
+
         Returns:
             WorldSetting对象
         """
+        existing = self._maybe_use_existing(
+            self.config.world_file, WorldSetting, force, "世界观"
+        )
+        if existing:
+            return existing
+
         print("🌍 正在生成世界观...")
-        world = generate_world(user_input, verbose=self.verbose)
+        world = generate_world(
+            user_input,
+            verbose=self.verbose,
+            llm_config=self.config.world_chain_config.llm_config
+        )
         self.save_json(world, self.config.world_file)
         print(f"✅ 世界观已保存: {self.config.world_file}")
         return world
     
-    def step2_create_theme_conflict(self, user_input: str = "") -> ThemeConflict:
+    def step2_create_theme_conflict(self, user_input: str = "", force: bool = False) -> ThemeConflict:
         """
         步骤2: 创建主题冲突
-        
+
         Args:
             user_input: 用户关于故事方向的描述
-            
+
         Returns:
             ThemeConflict对象
         """
+        existing = self._maybe_use_existing(
+            self.config.theme_conflict_file, ThemeConflict, force, "主题冲突"
+        )
+        if existing:
+            return existing
+
         print("📖 正在生成主题冲突...")
         world = self.load_json(self.config.world_file, WorldSetting)
         if not world:
             raise ValueError("世界观文件不存在，请先执行步骤1")
-        
-        theme_conflict = generate_theme_conflict(world, user_input, verbose=self.verbose)
+
+        theme_conflict = generate_theme_conflict(
+            world,
+            user_input,
+            verbose=self.verbose,
+            llm_config=self.config.theme_conflict_chain_config.llm_config
+        )
         self.save_json(theme_conflict, self.config.theme_conflict_file)
         print(f"✅ 主题冲突已保存: {self.config.theme_conflict_file}")
         return theme_conflict
     
-    def step3_create_characters(self) -> CharactersConfig:
+    def step3_create_characters(self, force: bool = False) -> CharactersConfig:
         """
         步骤3: 创建角色
         
         Returns:
             CharactersConfig对象
         """
+        existing = self._maybe_use_existing(
+            self.config.characters_file, CharactersConfig, force, "角色设定"
+        )
+        if existing:
+            return existing
+
         print("👥 正在生成角色...")
         world = self.load_json(self.config.world_file, WorldSetting)
         theme_conflict = self.load_json(self.config.theme_conflict_file, ThemeConflict)
         
         if not world or not theme_conflict:
             raise ValueError("世界观或主题冲突文件不存在，请先执行前置步骤")
-        
-        characters = generate_characters(world, theme_conflict, verbose=self.verbose)
+
+        characters = generate_characters(
+            world,
+            theme_conflict,
+            verbose=self.verbose,
+            llm_config=self.config.characters_chain_config.llm_config
+        )
         self.save_json(characters, self.config.characters_file)
         print(f"✅ 角色已保存: {self.config.characters_file}")
         return characters
     
-    def step4_create_outline(self, num_chapters: int = 20) -> Outline:
+    def step4_create_outline(self, num_chapters: int = 20, force: bool = False) -> Outline:
         """
         步骤4: 创建大纲
         
@@ -127,6 +180,12 @@ class NovelOrchestrator:
         Returns:
             Outline对象
         """
+        existing = self._maybe_use_existing(
+            self.config.outline_file, Outline, force, "小说大纲"
+        )
+        if existing:
+            return existing
+
         print("📋 正在生成大纲...")
         world = self.load_json(self.config.world_file, WorldSetting)
         theme_conflict = self.load_json(self.config.theme_conflict_file, ThemeConflict)
@@ -134,13 +193,20 @@ class NovelOrchestrator:
         
         if not all([world, theme_conflict, characters]):
             raise ValueError("缺少前置文件，请先执行前置步骤")
-        
-        outline = generate_outline(world, theme_conflict, characters, num_chapters, verbose=self.verbose)
+
+        outline = generate_outline(
+            world,
+            theme_conflict,
+            characters,
+            num_chapters,
+            verbose=self.verbose,
+            llm_config=self.config.outline_chain_config.llm_config
+        )
         self.save_json(outline, self.config.outline_file)
         print(f"✅ 大纲已保存: {self.config.outline_file}")
         return outline
     
-    def step5_create_chapter_plan(self, chapter_number: int) -> ChapterPlan:
+    def step5_create_chapter_plan(self, chapter_number: int, force: bool = False) -> ChapterPlan:
         """
         步骤5: 创建章节计划
         
@@ -150,6 +216,16 @@ class NovelOrchestrator:
         Returns:
             ChapterPlan对象
         """
+        plan_file = os.path.join(
+            self.config.chapters_dir,
+            f"chapter_{chapter_number:03d}_plan.json"
+        )
+        existing = self._maybe_use_existing(
+            plan_file, ChapterPlan, force, f"第{chapter_number}章章节计划"
+        )
+        if existing:
+            return existing
+
         print(f"📝 正在生成第{chapter_number}章的计划...")
         world = self.load_json(self.config.world_file, WorldSetting)
         characters = self.load_json(self.config.characters_file, CharactersConfig)
@@ -168,13 +244,15 @@ class NovelOrchestrator:
         if not chapter_summary:
             raise ValueError(f"章节{chapter_number}不存在于大纲中")
         
-        chapter_plan = generate_chapter_plan(chapter_summary, world, characters, verbose=self.verbose)
+        chapter_plan = generate_chapter_plan(
+            chapter_summary,
+            world,
+            characters,
+            verbose=self.verbose,
+            llm_config=self.config.chapters_plan_chain_config.llm_config
+        )
         
         # 保存章节计划
-        plan_file = os.path.join(
-            self.config.chapters_dir,
-            f"chapter_{chapter_number:03d}_plan.json"
-        )
         self.save_json(chapter_plan, plan_file)
         print(f"✅ 章节计划已保存: {plan_file}")
         return chapter_plan
@@ -208,7 +286,14 @@ class NovelOrchestrator:
         
         for scene_plan in chapter_plan.scenes:
             print(f"  生成场景 {scene_plan.scene_number}...")
-            scene = generate_scene_text(scene_plan, world, characters, previous_summary, verbose=self.verbose)
+            scene = generate_scene_text(
+                scene_plan,
+                world,
+                characters,
+                previous_summary,
+                verbose=self.verbose,
+                llm_config=self.config.scene_text_chain_config.llm_config
+            )
             scenes.append(scene)
             
             # 更新前文概要

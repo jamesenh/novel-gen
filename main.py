@@ -8,7 +8,9 @@ from novelgen.runtime.orchestrator import NovelOrchestrator
 def demo_full_flow():
     """演示完整的小说生成流程"""
     # 创建编排器（verbose=True 将显示详细日志）
-    orchestrator = NovelOrchestrator(project_name="demo_001", verbose=False)
+    orchestrator = NovelOrchestrator(project_name="demo_002", verbose=False)
+    print(f"项目目录: {orchestrator.project_dir}")
+    print("提示：重复运行会自动续写，已生成的阶段会跳过（如需重建可传入 force=True）。")
     
     # 步骤1: 创建世界观
     print("\n" + "="*60)
@@ -39,13 +41,13 @@ def demo_full_flow():
     print("\n" + "="*60)
     print("步骤4: 创建大纲")
     print("="*60)
-    outline = orchestrator.step4_create_outline(num_chapters=10)
+    outline = orchestrator.step4_create_outline(num_chapters=5)
     print(f"章节数: {len(outline.chapters)}")
 
-    print("\n" + "="*60)
-    print("步骤5: 生成所有章节文本")
-    print("="*60)
-    orchestrator.generate_all_chapters()
+    # print("\n" + "="*60)
+    # print("步骤5: 生成所有章节文本")
+    # print("="*60)
+    # orchestrator.generate_all_chapters()
     
     # # 步骤5: 生成第一章计划
     # print("\n" + "="*60)
@@ -67,6 +69,18 @@ def demo_full_flow():
     print("="*60)
     print(f"项目文件已保存到: {orchestrator.project_dir}")
 
+    orchestrator.export_all_chapters()
+    print(f"小说已导出到: {orchestrator.project_dir}/demo_002_full.txt")
+
+def export_novel_cmd(project_name: str):
+    """
+    导出整本小说为txt文件
+    
+    Args:
+        project_name: 项目名称
+    """
+    orchestrator = NovelOrchestrator(project_name=project_name)
+    orchestrator.export_all_chapters()
 
 def demo_single_step():
     """演示单步执行"""
@@ -145,5 +159,5 @@ def export_novel_cmd(project_name: str):
 
 if __name__ == "__main__":
     # test_generate_chapter_text()
-    # main()
-    export_novel_cmd("demo_001")
+    demo_full_flow()
+    # export_novel_cmd("demo_001")

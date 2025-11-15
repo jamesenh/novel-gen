@@ -8,10 +8,10 @@ from novelgen.models import ThemeConflict, WorldSetting
 from novelgen.llm import get_llm
 
 
-def create_theme_conflict_chain(verbose: bool = False):
+def create_theme_conflict_chain(verbose: bool = False, llm_config=None):
     """创建主题冲突生成链"""
     parser = PydanticOutputParser[ThemeConflict](pydantic_object=ThemeConflict)
-    
+
     prompt = ChatPromptTemplate.from_messages([
         ("system", """你是一位专业的故事策划师。
 
@@ -33,33 +33,34 @@ def create_theme_conflict_chain(verbose: bool = False):
 用户需求：
 {user_input}""")
     ])
-    
-    llm = get_llm(verbose=verbose)
+
+    llm = get_llm(config=llm_config, verbose=verbose)
     chain = prompt | llm | parser
-    
+
     return chain
 
 
-def generate_theme_conflict(world_setting: WorldSetting, user_input: str = "", verbose: bool = False) -> ThemeConflict:
+def generate_theme_conflict(world_setting: WorldSetting, user_input: str = "", verbose: bool = False, llm_config=None) -> ThemeConflict:
     """
     生成主题冲突
-    
+
     Args:
         world_setting: 世界观设定
         user_input: 用户关于故事方向的描述
         verbose: 是否输出详细日志（提示词、时间、token）
-        
+        llm_config: LLM配置
+
     Returns:
         ThemeConflict对象
     """
-    chain = create_theme_conflict_chain(verbose=verbose)
+    chain = create_theme_conflict_chain(verbose=verbose, llm_config=llm_config)
     parser = PydanticOutputParser[ThemeConflict](pydantic_object=ThemeConflict)
-    
+
     result = chain.invoke({
         "world_setting": world_setting.model_dump_json(indent=2),
         "user_input": user_input if user_input else "请基于世界观自由发挥",
         "format_instructions": parser.get_format_instructions()
     })
-    
+
     return result
 

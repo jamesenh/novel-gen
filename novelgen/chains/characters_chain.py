@@ -8,10 +8,10 @@ from novelgen.models import CharactersConfig, WorldSetting, ThemeConflict
 from novelgen.llm import get_llm
 
 
-def create_characters_chain(verbose: bool = False):
+def create_characters_chain(verbose: bool = False, llm_config=None):
     """创建角色生成链"""
     parser = PydanticOutputParser[CharactersConfig](pydantic_object=CharactersConfig)
-    
+
     prompt = ChatPromptTemplate.from_messages([
         ("system", """你是一位专业的角色设计师。
 
@@ -35,33 +35,34 @@ def create_characters_chain(verbose: bool = False):
 主题冲突：
 {theme_conflict}""")
     ])
-    
-    llm = get_llm(verbose=verbose)
+
+    llm = get_llm(config=llm_config, verbose=verbose)
     chain = prompt | llm | parser
-    
+
     return chain
 
 
-def generate_characters(world_setting: WorldSetting, theme_conflict: ThemeConflict, verbose: bool = False) -> CharactersConfig:
+def generate_characters(world_setting: WorldSetting, theme_conflict: ThemeConflict, verbose: bool = False, llm_config=None) -> CharactersConfig:
     """
     生成角色
-    
+
     Args:
         world_setting: 世界观设定
         theme_conflict: 主题冲突
         verbose: 是否输出详细日志（提示词、时间、token）
-        
+        llm_config: LLM配置
+
     Returns:
         CharactersConfig对象
     """
-    chain = create_characters_chain(verbose=verbose)
+    chain = create_characters_chain(verbose=verbose, llm_config=llm_config)
     parser = PydanticOutputParser[CharactersConfig](pydantic_object=CharactersConfig)
-    
+
     result = chain.invoke({
         "world_setting": world_setting.model_dump_json(indent=2),
         "theme_conflict": theme_conflict.model_dump_json(indent=2),
         "format_instructions": parser.get_format_instructions()
     })
-    
+
     return result
 
