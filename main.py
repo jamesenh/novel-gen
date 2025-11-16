@@ -8,7 +8,7 @@ from novelgen.runtime.orchestrator import NovelOrchestrator
 def demo_full_flow():
     """演示完整的小说生成流程"""
     # 创建编排器（verbose=True 将显示详细日志）
-    orchestrator = NovelOrchestrator(project_name="demo_002", verbose=False)
+    orchestrator = NovelOrchestrator(project_name="demo_002", verbose=True)
     print(f"项目目录: {orchestrator.project_dir}")
     print("提示：重复运行会自动续写，已生成的阶段会跳过（如需重建可传入 force=True）。")
     
@@ -53,16 +53,16 @@ def demo_full_flow():
     print("\n" + "="*60)
     print("步骤5: 生成章节计划")
     print("="*60)
-    chapter_plan = orchestrator.step5_create_chapter_plan(chapter_number=[1, 2, 3, 4])
+    chapter_plan = orchestrator.step5_create_chapter_plan(chapter_number=[1, 2, 3, 4, 5])
     # print(f"第1章: {chapter_plan.chapter_title}")
     # print(f"场景数: {len(chapter_plan.scenes)}")
     
-    # # 步骤6: 生成第一章文本
-    # print("\n" + "="*60)
-    # print("步骤6: 生成章节文本")
-    # print("="*60)
-    # chapter = orchestrator.step6_generate_chapter_text(chapter_number=1)
-    # print(f"第1章完成，总字数: {chapter.total_words}")
+    # 步骤6: 生成第一章文本
+    print("\n" + "="*60)
+    print("步骤6: 生成章节文本")
+    print("="*60)
+    chapter = orchestrator.step6_generate_chapter_text(chapter_number=5)
+    print(f"第1章完成，总字数: {chapter.total_words}")
     
     print("\n" + "="*60)
     print("🎉 演示完成！")
@@ -82,29 +82,13 @@ def export_novel_cmd(project_name: str):
     orchestrator = NovelOrchestrator(project_name=project_name)
     orchestrator.export_all_chapters()
 
-def demo_single_step():
-    """演示单步执行"""
-    # verbose=True 会显示完整提示词、响应时间和token使用情况
-    orchestrator = NovelOrchestrator(project_name="my_novel", verbose=True)
-    
-    # 只执行某一步
-    world = orchestrator.step1_create_world(
-        "一个赛博朋克世界，充满了高科技和低生活"
-    )
-    print(f"世界观已创建: {world.world_name}")
-
-
 def main():
     """主函数"""
     print("NovelGen - AI小说生成器")
     print("作者: Jamesenh")
     print()
     
-    # 取消注释以运行演示
     demo_full_flow()
-    # demo_single_step()
-    
-    # print("请取消注释 main() 中的演示函数来运行示例")
 
 def test_world_chain():
     """测试世界观生成链"""

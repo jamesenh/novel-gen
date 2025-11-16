@@ -109,6 +109,9 @@ def generate_scene_text(
         "characters": characters.model_dump_json(indent=2),
         "scene_plan": scene_plan.model_dump_json(indent=2),
         "scene_plan_obj": scene_plan,  # 传递对象本身，用于访问具体属性
+        "scene_plan_obj.intensity": scene_plan.intensity,
+        "scene_plan_obj.scene_type": scene_plan.scene_type,
+        "scene_plan_obj.estimated_words": scene_plan.estimated_words,
         "previous_summary": previous_summary if previous_summary else "这是第一个场景",
         "format_instructions": parser.get_format_instructions(),
         "word_count_min": word_count_min,
