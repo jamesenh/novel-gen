@@ -21,7 +21,8 @@ def create_consistency_chain(verbose: bool = False, llm_config=None):
 {format_instructions}
 
 字段说明：
-- issues: 列出每个冲突（类型、描述、涉及角色、severity、是否可自动修复以及修复指令）
+- issues: 列出每个冲突（类型、描述、涉及角色、severity、修复建议）
+  - fix_instructions: 只为可自动修复的问题提供具体修复建议；若问题无法自动修复或需要人工判断，将此字段留空（null）
 - summary: 本次审查结论总结
 - context_snapshot: 将输入的上下文进行50字以内摘要，方便追溯"""),
         ("user", """【章节编号】

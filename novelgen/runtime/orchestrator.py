@@ -11,7 +11,7 @@ from typing import Optional, Union, List
 from novelgen.models import (
     WorldSetting, ThemeConflict, CharactersConfig,
     Outline, ChapterPlan, GeneratedChapter, GeneratedScene,
-    ChapterSummary, ChapterMemoryEntry, ConsistencyReport
+    ChapterSummary, ChapterMemoryEntry, ConsistencyReport, RevisionStatus
 )
 from novelgen.config import ProjectConfig
 from novelgen.chains.world_chain import generate_world
@@ -24,7 +24,8 @@ from novelgen.runtime.exporter import export_chapter_to_txt, export_all_chapters
 from novelgen.runtime.summary import summarize_scene, summarize_scenes
 from novelgen.runtime.memory import generate_chapter_memory_entry
 from novelgen.runtime.consistency import run_consistency_check
-from novelgen.runtime.revision import revise_text
+from novelgen.chains.chapter_revision_chain import revise_chapter
+from datetime import datetime
 
 
 class NovelOrchestrator:
@@ -210,34 +211,120 @@ class NovelOrchestrator:
         with open(self.config.consistency_report_file, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
-    def _maybe_trigger_auto_revision(self, report: ConsistencyReport, chapter_text: str, chapter_number: int):
+    def _handle_revision_stage(self, report: ConsistencyReport, chapter: GeneratedChapter):
         """
-        如果一致性报告包含可自动修复项，则调用修订链并输出结果
+        根据 revision_policy 处理章节修订阶段
 
         Args:
             report: 一致性检测结果
-            chapter_text: 原章节文本
-            chapter_number: 当前章节编号
+            chapter: 原始章节对象
+
+        Returns:
+            修订后的章节（如果 auto_apply），或原始章节（其他情况）
         """
+        chapter_number = chapter.chapter_number
+        
+        # 检查是否有可自动修复的问题（基于 fix_instructions 是否存在）
         actionable = [
             issue for issue in report.issues
-            if issue.can_auto_fix and issue.fix_instructions
+            if issue.fix_instructions and issue.fix_instructions.strip()
         ]
         if not actionable:
-            return
+            return chapter
 
         revision_notes = "\n".join(
             f"- {issue.issue_type}: {issue.fix_instructions}"
             for issue in actionable
         )
-        revised_text = revise_text(chapter_text, revision_notes)
-        revision_file = os.path.join(
-            self.config.chapters_dir,
-            f"chapter_{chapter_number:03d}_revised.txt"
-        )
-        with open(revision_file, 'w', encoding='utf-8') as f:
-            f.write(revised_text)
-        print(f"🔁 已针对章节{chapter_number}生成修订稿：{revision_file}")
+
+        policy = self.config.revision_policy
+        
+        if policy == "none":
+            # 保持当前行为：不做任何修订
+            return chapter
+        
+        elif policy == "auto_apply":
+            # 自动应用模式：直接修订并更新 JSON
+            print(f"🔧 [auto_apply] 正在对第{chapter_number}章进行自动修订，修复{len(actionable)}个问题...")
+            try:
+                revised_chapter = revise_chapter(
+                    original_chapter=chapter,
+                    revision_notes=revision_notes,
+                    verbose=self.verbose,
+                    llm_config=self.config.revision_chain_config.llm_config
+                )
+                
+                # 保存修订后的章节 JSON
+                chapter_file = os.path.join(
+                    self.config.chapters_dir,
+                    f"chapter_{chapter_number:03d}.json"
+                )
+                self.save_json(revised_chapter, chapter_file)
+                print(f"✅ 第{chapter_number}章修订完成，已更新章节 JSON")
+                
+                # 可选：导出可读文本供审阅
+                revised_text = self._collect_chapter_text(revised_chapter)
+                revision_txt_file = os.path.join(
+                    self.config.chapters_dir,
+                    f"chapter_{chapter_number:03d}_revised.txt"
+                )
+                with open(revision_txt_file, 'w', encoding='utf-8') as f:
+                    f.write(revised_text)
+                print(f"📄 修订文本已导出至：{revision_txt_file}")
+                
+                return revised_chapter
+                
+            except Exception as exc:
+                print(f"⚠️ 自动修订失败：{exc}，保持原章节")
+                return chapter
+        
+        elif policy == "manual_confirm":
+            # 人工确认模式：生成修订候选，标记为 pending
+            print(f"📝 [manual_confirm] 正在生成第{chapter_number}章修订候选...")
+            try:
+                revised_chapter = revise_chapter(
+                    original_chapter=chapter,
+                    revision_notes=revision_notes,
+                    verbose=self.verbose,
+                    llm_config=self.config.revision_chain_config.llm_config
+                )
+                
+                # 创建修订状态记录
+                revision_status = RevisionStatus(
+                    chapter_number=chapter_number,
+                    status="pending",
+                    revision_notes=revision_notes,
+                    issues=actionable,
+                    revised_chapter=revised_chapter,
+                    created_at=datetime.now().isoformat()
+                )
+                
+                # 保存修订状态文件
+                revision_status_file = os.path.join(
+                    self.config.chapters_dir,
+                    f"chapter_{chapter_number:03d}_revision.json"
+                )
+                self.save_json(revision_status, revision_status_file)
+                print(f"✅ 第{chapter_number}章修订候选已生成，状态：pending")
+                print(f"⏸️  请审核修订候选后调用 apply_revision 应用修订")
+                
+                # 可选：导出可读文本便于人工对比
+                revised_text = self._collect_chapter_text(revised_chapter)
+                revision_txt_file = os.path.join(
+                    self.config.chapters_dir,
+                    f"chapter_{chapter_number:03d}_revised.txt"
+                )
+                with open(revision_txt_file, 'w', encoding='utf-8') as f:
+                    f.write(revised_text)
+                print(f"📄 修订候选文本已导出至：{revision_txt_file}")
+                
+                return chapter  # 返回原始章节，不修改 JSON
+                
+            except Exception as exc:
+                print(f"⚠️ 生成修订候选失败：{exc}")
+                return chapter
+        
+        return chapter
 
     def _collect_chapter_text(self, chapter: GeneratedChapter) -> str:
         """将章节场景拼接成纯文本，供一致性检测使用"""
@@ -576,11 +663,14 @@ class NovelOrchestrator:
             scenes.append(scene)
 
             # 更新前文概要
+            print(f"    📝 正在生成场景{scene.scene_number}摘要...")
             scene_summary = self._summarize_scene_safe(scene)
             scene_summaries.append(f"场景{scene.scene_number}: {scene_summary}")
             previous_summary = scene_summary
+            print(f"    ✅ 场景{scene.scene_number}摘要生成完成")
 
         aggregated_summary = self._summarize_chapter_safe(scenes)
+        print(f"📋 第{chapter_number}章聚合摘要生成完成")
 
         # 组装章节
         total_words = sum(scene.word_count for scene in scenes)
@@ -596,6 +686,7 @@ class NovelOrchestrator:
         print(f"✅ 章节文本已保存: {text_file}")
 
         # 更新章节记忆
+        print(f"🧠 正在为第{chapter_number}章生成记忆条目...")
         try:
             memory_entry = generate_chapter_memory_entry(
                 chapter=chapter,
@@ -606,12 +697,14 @@ class NovelOrchestrator:
                 llm_config=self.config.chapter_memory_chain_config.llm_config
             )
             self._append_chapter_memory_entry(memory_entry)
+            print(f"✅ 第{chapter_number}章记忆条目已保存")
         except Exception as exc:
             print(f"⚠️ 章节记忆生成失败：{exc}")
 
         # 一致性检测
         chapter_text = self._collect_chapter_text(chapter)
         context_payload = self._build_consistency_context(chapter_number, chapter_summary)
+        print(f"🔍 正在对第{chapter_number}章进行一致性检测...")
         try:
             report = run_consistency_check(
                 chapter_number=chapter_number,
@@ -621,11 +714,54 @@ class NovelOrchestrator:
                 llm_config=self.config.consistency_chain_config.llm_config
             )
             self._record_consistency_report(report)
-            self._maybe_trigger_auto_revision(report, chapter_text, chapter_number)
+            
+            # 输出一致性检测结果
+            issue_count = len(report.issues)
+            if issue_count == 0:
+                print(f"✅ 第{chapter_number}章一致性检测通过，未发现问题")
+            else:
+                severity_summary = {}
+                for issue in report.issues:
+                    severity = issue.severity
+                    severity_summary[severity] = severity_summary.get(severity, 0) + 1
+                
+                severity_info = ", ".join([f"{k}({v})" for k, v in severity_summary.items()])
+                print(f"⚠️ 第{chapter_number}章一致性检测发现{issue_count}个问题: {severity_info}")
+                
+                # 显示包含修复建议的问题数量
+                auto_fixable = sum(1 for issue in report.issues if issue.fix_instructions and issue.fix_instructions.strip())
+                if auto_fixable > 0:
+                    print(f"🔧 其中{auto_fixable}个问题包含修复建议")
+            
+            # 根据 revision_policy 处理修订阶段
+            chapter = self._handle_revision_stage(report, chapter)
         except Exception as exc:
             print(f"⚠️ 一致性检测失败：{exc}")
 
         return chapter
+
+    def _check_pending_revisions(self) -> List[int]:
+        """
+        检查是否有待确认的修订
+
+        Returns:
+            待确认章节编号列表
+        """
+        pending_chapters = []
+        if not os.path.exists(self.config.chapters_dir):
+            return pending_chapters
+
+        for filename in os.listdir(self.config.chapters_dir):
+            if filename.endswith("_revision.json"):
+                filepath = os.path.join(self.config.chapters_dir, filename)
+                try:
+                    revision_status = self.load_json(filepath, RevisionStatus)
+                    if revision_status and revision_status.status == "pending":
+                        pending_chapters.append(revision_status.chapter_number)
+                except Exception:
+                    pass  # 忽略无法解析的文件
+        
+        return sorted(pending_chapters)
 
     def generate_all_chapters(self, chapter_numbers: Optional[List[int]] = None, force: bool = False):
         """生成所有章节"""
@@ -642,15 +778,111 @@ class NovelOrchestrator:
                     raise ValueError(f"章节{num}不存在于大纲中")
             target_numbers = sorted(chapter_numbers)
 
-        for chapter_num in target_numbers:
+        total = len(target_numbers)
+        for idx, num in enumerate(target_numbers, start=1):
+            # 在 manual_confirm 模式下检查待确认修订
+            if self.config.revision_policy == "manual_confirm":
+                pending_revisions = self._check_pending_revisions()
+                # 检查是否有编号小于当前章节的待确认修订
+                blocking_revisions = [ch for ch in pending_revisions if ch < num]
+                if blocking_revisions:
+                    blocking_list = ", ".join(map(str, blocking_revisions))
+                    raise RuntimeError(
+                        f"⏸️ [manual_confirm] 无法继续生成第{num}章：存在待确认的修订章节 [{blocking_list}]。\n"
+                        f"请先调用 apply_revision 处理这些章节的修订，或切换 revision_policy。"
+                    )
 
-            # 生成章节计划
-            self.step5_create_chapter_plan(chapter_num, force=force)
+            print(f"\n{'='*60}")
+            print(f"[{idx}/{total}] 生成第{num}章")
+            print(f"{'='*60}")
+            try:
+                self.step6_generate_chapter_text(chapter_number=num, force=force)
+            except Exception as exc:
+                print(f"✗ 第{num}章生成失败：{exc}")
+                # 失败后继续生成下一章（可选，视业务需求而定）
 
-            # 生成章节文本
-            self.step6_generate_chapter_text(chapter_num, force=force)
+    def apply_revision(self, chapter_number: int, rebuild_memory: bool = True):
+        """
+        应用待确认的修订（将修订候选应用到章节 JSON）
 
-        print(f"\n🎉 共{len(target_numbers)}章已生成完毕！")
+        Args:
+            chapter_number: 章节编号
+            rebuild_memory: 是否重建章节记忆
+        """
+        revision_status_file = os.path.join(
+            self.config.chapters_dir,
+            f"chapter_{chapter_number:03d}_revision.json"
+        )
+        
+        if not os.path.exists(revision_status_file):
+            raise ValueError(f"第{chapter_number}章没有待确认的修订")
+        
+        # 读取修订状态
+        revision_status = self.load_json(revision_status_file, RevisionStatus)
+        if not revision_status:
+            raise ValueError(f"无法解析第{chapter_number}章的修订状态文件")
+        
+        if revision_status.status != "pending":
+            print(f"⚠️ 第{chapter_number}章修订状态为 {revision_status.status}，非 pending 状态")
+            return
+        
+        if not revision_status.revised_chapter:
+            raise ValueError(f"第{chapter_number}章修订状态中缺少 revised_chapter")
+        
+        print(f"📝 正在应用第{chapter_number}章的修订...")
+        
+        # 将修订候选覆盖到章节 JSON
+        chapter_file = os.path.join(
+            self.config.chapters_dir,
+            f"chapter_{chapter_number:03d}.json"
+        )
+        self.save_json(revision_status.revised_chapter, chapter_file)
+        print(f"✅ 第{chapter_number}章修订已应用到 chapter JSON")
+        
+        # 更新修订状态为 accepted
+        revision_status.status = "accepted"
+        revision_status.decision_at = datetime.now().isoformat()
+        self.save_json(revision_status, revision_status_file)
+        print(f"✅ 修订状态已更新为 accepted")
+        
+        # 可选：重建章节记忆
+        if rebuild_memory:
+            try:
+                print(f"🧠 正在重建第{chapter_number}章的记忆条目...")
+                # 读取大纲和角色配置
+                outline = self.load_json(self.config.outline_file, Outline)
+                if not outline:
+                    print(f"⚠️ 大纲文件不存在，跳过记忆重建")
+                    return
+                
+                chapter_summary_list = [ch for ch in outline.chapters if ch.chapter_number == chapter_number]
+                if not chapter_summary_list:
+                    print(f"⚠️ 大纲中未找到第{chapter_number}章，跳过记忆重建")
+                    return
+                chapter_summary = chapter_summary_list[0]
+                
+                # 生成场景摘要（简化版，实际可能需要更复杂的逻辑）
+                chapter = revision_status.revised_chapter
+                scene_summaries = [
+                    f"场景{scene.scene_number}: {scene.content[:100]}..."
+                    for scene in chapter.scenes
+                ]
+                aggregated_summary = f"{chapter.chapter_title} - {len(chapter.scenes)}个场景"
+                
+                # 生成章节记忆
+                from novelgen.runtime.memory import generate_chapter_memory_entry
+                memory_entry = generate_chapter_memory_entry(
+                    chapter=chapter,
+                    outline_summary=chapter_summary,
+                    scene_summaries=scene_summaries,
+                    aggregated_summary=aggregated_summary,
+                    verbose=self.verbose,
+                    llm_config=self.config.chapter_memory_chain_config.llm_config
+                )
+                self._append_chapter_memory_entry(memory_entry)
+                print(f"✅ 第{chapter_number}章记忆条目已重建")
+            except Exception as exc:
+                print(f"⚠️ 重建章节记忆失败：{exc}")
 
     def export_chapter(self, chapter_number: int, output_path: Optional[str] = None):
         """

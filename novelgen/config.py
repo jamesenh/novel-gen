@@ -3,7 +3,7 @@
 管理LLM配置、API密钥等
 """
 import os
-from typing import Optional, Dict
+from typing import Optional, Dict, Literal
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
@@ -80,7 +80,8 @@ class LLMConfig(BaseModel):
                 "chapters_plan_chain": {"model_name": "gpt-3.5-turbo", "max_tokens": 1000},
                 "scene_text_chain": {"model_name": "gpt-4", "max_tokens": 8000},
                 "chapter_memory_chain": {"model_name": "gpt-4o-mini", "max_tokens": 2000},
-                "consistency_chain": {"model_name": "gpt-4o-mini", "max_tokens": 4000}
+                "consistency_chain": {"model_name": "gpt-4o-mini", "max_tokens": 4000},
+                "revision_chain": {"model_name": "gpt-4o-mini", "max_tokens": 8000}
             }
 
             if self.chain_name in default_configs:
@@ -115,6 +116,18 @@ class ProjectConfig(BaseModel):
     project_dir: str = Field(description="项目目录")
     author: str = Field(default="Jamesenh", description="作者名称")
     memory_context_chapters: int = Field(default=3, description="构建章节上下文时参考的最近章节数量")
+    revision_policy: Literal["none", "auto_apply", "manual_confirm"] = Field(
+        default="none",
+        description="章节修订策略：none(不修订), auto_apply(自动应用), manual_confirm(人工确认)"
+    )
+
+    def __init__(self, **data):
+        # 从环境变量读取 revision_policy（如果未在参数中提供）
+        if "revision_policy" not in data:
+            env_policy = os.getenv("NOVELGEN_REVISION_POLICY", "none")
+            if env_policy in ("none", "auto_apply", "manual_confirm"):
+                data["revision_policy"] = env_policy
+        super().__init__(**data)
 
     # 各个链的配置，设置不同的chain_name
     world_chain_config: ChainConfig = Field(
@@ -148,6 +161,10 @@ class ProjectConfig(BaseModel):
     consistency_chain_config: ChainConfig = Field(
         default_factory=lambda: ChainConfig(chain_name="consistency_chain"),
         description="章节一致性检测链配置"
+    )
+    revision_chain_config: ChainConfig = Field(
+        default_factory=lambda: ChainConfig(chain_name="revision_chain"),
+        description="章节修订链配置"
     )
 
     @property

@@ -133,13 +133,15 @@ class ChapterMemoryEntry(BaseModel):
 
 
 class ConsistencyIssue(BaseModel):
-    """一致性问题"""
+    """一致性问题
+    
+    注：是否可自动修复通过 fix_instructions 是否为空来判断
+    """
     issue_type: str = Field(description="问题类型（设定冲突/角色矛盾等）")
     description: str = Field(description="问题描述")
     related_characters: List[str] = Field(default_factory=list, description="涉及角色")
     severity: str = Field(default="medium", description="严重程度: low/medium/high")
-    can_auto_fix: bool = Field(default=False, description="是否支持自动修订")
-    fix_instructions: Optional[str] = Field(default=None, description="自动修订建议")
+    fix_instructions: Optional[str] = Field(default=None, description="修复建议（若为空则不可自动修复）")
 
 
 class ConsistencyReport(BaseModel):
@@ -148,3 +150,14 @@ class ConsistencyReport(BaseModel):
     issues: List[ConsistencyIssue] = Field(default_factory=list, description="发现的问题列表")
     summary: str = Field(description="检测摘要")
     context_snapshot: Optional[str] = Field(default=None, description="用于检测的上下文摘要")
+
+
+class RevisionStatus(BaseModel):
+    """章节修订状态"""
+    chapter_number: int = Field(description="章节编号")
+    status: str = Field(description="状态: pending/accepted/rejected")
+    revision_notes: str = Field(description="修订说明")
+    issues: List[ConsistencyIssue] = Field(default_factory=list, description="待修复问题列表")
+    revised_chapter: Optional[GeneratedChapter] = Field(default=None, description="修订候选的完整章节结构")
+    created_at: str = Field(description="创建时间")
+    decision_at: Optional[str] = Field(default=None, description="确认时间")
