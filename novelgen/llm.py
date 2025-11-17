@@ -110,12 +110,17 @@ def get_llm(config: LLMConfig = None, verbose: bool = False):
     if verbose:
         callbacks.append(VerboseCallbackHandler())
     
+    extra_body = None
+    if config.base_url and "api-inference.modelscope.cn" in config.base_url:
+        extra_body = {"enable_thinking": False}
+    
     return ChatOpenAI(
         model=config.model_name,
         temperature=config.temperature,
         max_tokens=config.max_tokens,
         api_key=config.api_key,
         base_url=config.base_url,
-        callbacks=callbacks if callbacks else None
+        callbacks=callbacks if callbacks else None,
+        extra_body=extra_body
     )
 

@@ -56,12 +56,22 @@ class CharactersConfig(BaseModel):
     supporting_characters: List[Character] = Field(default_factory=list, description="配角列表")
 
 
+class ChapterDependency(BaseModel):
+    """章节依赖信息"""
+    dependency_type: str = Field(description="依赖类型，如事件/角色状态/地点等")
+    description: str = Field(description="依赖描述，说明必须满足的条件")
+    chapter_number: Optional[int] = Field(default=None, description="依赖的章节编号（如适用）")
+    event_id: Optional[str] = Field(default=None, description="依赖的事件ID或自定义标识")
+
+
 class ChapterSummary(BaseModel):
     """章节摘要"""
     chapter_number: int = Field(description="章节编号")
     chapter_title: str = Field(description="章节标题")
     summary: str = Field(description="章节概要")
     key_events: List[str] = Field(description="关键事件")
+    timeline_anchor: Optional[str] = Field(default=None, description="时间线锚点，表明本章发生的时间位置")
+    dependencies: List[ChapterDependency] = Field(default_factory=list, description="本章开始前必须满足的依赖列表")
 
 
 class Outline(BaseModel):
@@ -108,3 +118,33 @@ class GeneratedChapter(BaseModel):
     chapter_title: str = Field(description="章节标题")
     scenes: List[GeneratedScene] = Field(description="场景文本列表")
     total_words: int = Field(description="总字数")
+
+
+class ChapterMemoryEntry(BaseModel):
+    """章节记忆表记录"""
+    chapter_number: int = Field(description="章节编号")
+    chapter_title: str = Field(description="章节标题")
+    timeline_anchor: Optional[str] = Field(default=None, description="时间线锚点")
+    location_summary: Optional[str] = Field(default=None, description="本章主要地点概述")
+    key_events: List[str] = Field(default_factory=list, description="推动剧情的主要事件")
+    character_states: Dict[str, str] = Field(default_factory=dict, description="关键角色当前状态")
+    unresolved_threads: List[str] = Field(default_factory=list, description="未解决的悬念或任务")
+    summary: str = Field(description="章节摘要（整章）")
+
+
+class ConsistencyIssue(BaseModel):
+    """一致性问题"""
+    issue_type: str = Field(description="问题类型（设定冲突/角色矛盾等）")
+    description: str = Field(description="问题描述")
+    related_characters: List[str] = Field(default_factory=list, description="涉及角色")
+    severity: str = Field(default="medium", description="严重程度: low/medium/high")
+    can_auto_fix: bool = Field(default=False, description="是否支持自动修订")
+    fix_instructions: Optional[str] = Field(default=None, description="自动修订建议")
+
+
+class ConsistencyReport(BaseModel):
+    """一致性检测结果"""
+    chapter_number: int = Field(description="章节编号")
+    issues: List[ConsistencyIssue] = Field(default_factory=list, description="发现的问题列表")
+    summary: str = Field(description="检测摘要")
+    context_snapshot: Optional[str] = Field(default=None, description="用于检测的上下文摘要")

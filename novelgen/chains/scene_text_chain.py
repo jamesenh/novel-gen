@@ -22,7 +22,7 @@ def create_scene_text_chain(verbose: bool = False, llm_config=None):
 1. 语言：使用简体中文，避免西化表达
 2. 视角：采用第三人称有限视角，以本场景的核心角色为视角载体
 3. 字数：严格控制在目标字数的±20%范围内（目标字数见输入信息）
-4. 设定约束：不得修改世界观和角色配置中的任何已有信息，只能在此基础上展开。遇到不确定的地方，宁可模糊处理也不要编造新设定
+4. 设定约束：不得修改世界观、角色配置以及章节上下文中的任何既有信息。遇到不确定事项，宁可模糊处理也不要推翻上下文。
 
 【节奏控制】
 根据场景类型(scene_type)和强度(intensity)调整叙事节奏：
@@ -36,6 +36,9 @@ def create_scene_text_chain(verbose: bool = False, llm_config=None):
 - 角色关系和当前状态
 - 世界观设定（境界、规则等）
 - 事件承接关系
+
+【章节上下文】
+章节上下文提供最近若干章的关键状态及未决悬念。生成文本必须与其一致，若要引入新设定，需要在正文中给出合理解释。
 
 【避免套路化】
 - 避免陈词滥调和重复性的外貌/神态描写
@@ -62,6 +65,9 @@ def create_scene_text_chain(verbose: bool = False, llm_config=None):
 【角色配置】
 {characters}
 
+【章节上下文】
+{chapter_context}
+
 【场景计划】
 {scene_plan}
 
@@ -79,6 +85,7 @@ def generate_scene_text(
     world_setting: WorldSetting,
     characters: CharactersConfig,
     previous_summary: str = "",
+    chapter_context: str = "",
     verbose: bool = False,
     llm_config=None
 ) -> GeneratedScene:
@@ -113,10 +120,10 @@ def generate_scene_text(
         "scene_plan_obj.scene_type": scene_plan.scene_type,
         "scene_plan_obj.estimated_words": scene_plan.estimated_words,
         "previous_summary": previous_summary if previous_summary else "这是第一个场景",
+        "chapter_context": chapter_context or "[]",
         "format_instructions": parser.get_format_instructions(),
         "word_count_min": word_count_min,
         "word_count_max": word_count_max
     })
 
     return result
-

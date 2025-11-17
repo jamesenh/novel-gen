@@ -23,7 +23,7 @@ def create_chapter_plan_chain(verbose: bool = False, llm_config=None):
 2. 输出可直接驱动文本生成的场景计划
 
 输入说明：
-- 输入包含世界观、角色配置与章节摘要JSON
+- 输入包含世界观、角色配置、章节摘要、章节依赖与章节记忆
 - 场景数量由你根据剧情需要决定
 
 输出格式（JSON schema）：
@@ -31,12 +31,13 @@ def create_chapter_plan_chain(verbose: bool = False, llm_config=None):
 
 注意事项：
 1. 场景要有明确的地点和出场角色
-2. 每个场景要有清晰的目的
+2. 每个场景要有清晰的目的，并说明如何承接章节记忆中的未决悬念
 3. 场景之间要有连贯性
 4. 关键动作要推动情节发展
 5. 预计字数要合理（一般3000-5000字/场景）
-6. 严格按照JSON格式输出，不要使用Markdown包裹
-7. 文本中如需引用势力或法术名称，使用「」或\"，避免未转义双引号"""),
+6. 若章节依赖尚未完成，需在计划中安排补充交代或阻塞
+7. 严格按照JSON格式输出，不要使用Markdown包裹
+8. 文本中如需引用势力或法术名称，使用「」或\"，避免未转义双引号"""),
         ("user", """世界观设定：
 {world_setting}
 
@@ -44,7 +45,13 @@ def create_chapter_plan_chain(verbose: bool = False, llm_config=None):
 {characters}
 
 章节摘要：
-{chapter_summary}""")
+{chapter_summary}
+
+章节依赖：
+{chapter_dependencies}
+
+章节记忆（最近若干章）：
+{chapter_memory}""")
     ])
 
     chain = prompt | llm | parser
@@ -56,6 +63,8 @@ def generate_chapter_plan(
     chapter_summary: ChapterSummary,
     world_setting: WorldSetting,
     characters: CharactersConfig,
+    chapter_memory: str = "",
+    chapter_dependencies: str = "",
     verbose: bool = False,
     llm_config=None
 ) -> ChapterPlan:
@@ -79,8 +88,9 @@ def generate_chapter_plan(
         "world_setting": world_setting.model_dump_json(indent=2),
         "characters": characters.model_dump_json(indent=2),
         "chapter_summary": chapter_summary.model_dump_json(indent=2),
+        "chapter_memory": chapter_memory or "[]",
+        "chapter_dependencies": chapter_dependencies or "[]",
         "format_instructions": parser.get_format_instructions()
     })
 
     return result
-

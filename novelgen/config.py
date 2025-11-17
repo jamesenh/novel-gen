@@ -78,7 +78,9 @@ class LLMConfig(BaseModel):
                 "characters_chain": {"model_name": "gpt-4o-mini", "max_tokens": 2000},
                 "outline_chain": {"model_name": "gpt-4o-mini", "max_tokens": 3000},
                 "chapters_plan_chain": {"model_name": "gpt-3.5-turbo", "max_tokens": 1000},
-                "scene_text_chain": {"model_name": "gpt-4", "max_tokens": 8000}
+                "scene_text_chain": {"model_name": "gpt-4", "max_tokens": 8000},
+                "chapter_memory_chain": {"model_name": "gpt-4o-mini", "max_tokens": 2000},
+                "consistency_chain": {"model_name": "gpt-4o-mini", "max_tokens": 4000}
             }
 
             if self.chain_name in default_configs:
@@ -112,6 +114,7 @@ class ProjectConfig(BaseModel):
     """项目配置"""
     project_dir: str = Field(description="项目目录")
     author: str = Field(default="Jamesenh", description="作者名称")
+    memory_context_chapters: int = Field(default=3, description="构建章节上下文时参考的最近章节数量")
 
     # 各个链的配置，设置不同的chain_name
     world_chain_config: ChainConfig = Field(
@@ -138,6 +141,14 @@ class ProjectConfig(BaseModel):
         default_factory=lambda: ChainConfig(chain_name="scene_text_chain"),
         description="场景文本生成链配置"
     )
+    chapter_memory_chain_config: ChainConfig = Field(
+        default_factory=lambda: ChainConfig(chain_name="chapter_memory_chain"),
+        description="章节记忆生成链配置"
+    )
+    consistency_chain_config: ChainConfig = Field(
+        default_factory=lambda: ChainConfig(chain_name="consistency_chain"),
+        description="章节一致性检测链配置"
+    )
 
     @property
     def world_file(self) -> str:
@@ -159,3 +170,10 @@ class ProjectConfig(BaseModel):
     def chapters_dir(self) -> str:
         return os.path.join(self.project_dir, "chapters")
 
+    @property
+    def chapter_memory_file(self) -> str:
+        return os.path.join(self.project_dir, "chapter_memory.json")
+
+    @property
+    def consistency_report_file(self) -> str:
+        return os.path.join(self.project_dir, "consistency_reports.json")

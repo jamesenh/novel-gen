@@ -8,7 +8,7 @@ from novelgen.runtime.orchestrator import NovelOrchestrator
 def demo_full_flow():
     """演示完整的小说生成流程"""
     # 创建编排器（verbose=True 将显示详细日志）
-    orchestrator = NovelOrchestrator(project_name="demo_002", verbose=True)
+    orchestrator = NovelOrchestrator(project_name="demo_003", verbose=False)
     print(f"项目目录: {orchestrator.project_dir}")
     print("提示：重复运行会自动续写，已生成的阶段会跳过（如需重建可传入 force=True）。")
     
@@ -61,13 +61,17 @@ def demo_full_flow():
     print("\n" + "="*60)
     print("步骤6: 生成章节文本")
     print("="*60)
+    chapter = orchestrator.step6_generate_chapter_text(chapter_number=1)
+    chapter = orchestrator.step6_generate_chapter_text(chapter_number=2)
+    chapter = orchestrator.step6_generate_chapter_text(chapter_number=3)
+    chapter = orchestrator.step6_generate_chapter_text(chapter_number=4)
     chapter = orchestrator.step6_generate_chapter_text(chapter_number=5)
-    print(f"第1章完成，总字数: {chapter.total_words}")
+    # print(f"第1章完成，总字数: {chapter.total_words}")
     
-    print("\n" + "="*60)
-    print("🎉 演示完成！")
-    print("="*60)
-    print(f"项目文件已保存到: {orchestrator.project_dir}")
+    # print("\n" + "="*60)
+    # print("🎉 演示完成！")
+    # print("="*60)
+    # print(f"项目文件已保存到: {orchestrator.project_dir}")
 
     # orchestrator.export_all_chapters()
     # print(f"小说已导出到: {orchestrator.project_dir}/demo_002_full.txt")

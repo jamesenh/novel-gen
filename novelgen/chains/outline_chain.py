@@ -2,6 +2,7 @@
 大纲生成链
 基于世界观、主题冲突和角色生成故事大纲
 """
+import re
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from novelgen.models import Outline, WorldSetting, ThemeConflict, CharactersConfig
@@ -34,9 +35,10 @@ def create_outline_chain(verbose: bool = False, llm_config=None):
 2. 每个章节要有明确的目的和推进作用
 3. 章节之间要有逻辑递进关系
 4. 关键事件要体现主题和冲突
-5. 要为角色发展留出空间
-6. 严格按照JSON格式输出，不要使用Markdown包裹
-7. 禁止输出未转义的英文双引号，使用「」或\"表达引用"""),
+5. 为每个章节补充 timeline_anchor（例如「T+3 天」「第5夜」）以及 dependencies（依赖的章节/事件列表，即本章开始时必须已发生的事实）
+6. 若章节出现闪回或倒叙，需在timeline_anchor中标注「闪回/回忆」
+7. 严格按照JSON格式输出，不要使用Markdown包裹
+8. 禁止输出未转义的英文双引号，使用「」或\"表达引用"""),
         ("user", """世界观设定：
 {world_setting}
 
@@ -87,5 +89,43 @@ def generate_outline(
         "format_instructions": parser.get_format_instructions()
     })
 
+    _validate_outline_metadata(result)
     return result
 
+
+def _extract_timeline_value(anchor: str):
+    if not anchor:
+        return None
+    match = re.search(r"(-?\\d+)", anchor)
+    if match:
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def _validate_outline_metadata(outline: Outline):
+    """基础校验：时间线递进与依赖引用合法性"""
+    last_value = None
+    for chapter in outline.chapters:
+        if not chapter.timeline_anchor:
+            raise ValueError(f"章节 {chapter.chapter_number} 缺少 timeline_anchor")
+
+        value = _extract_timeline_value(chapter.timeline_anchor)
+        if value is not None and last_value is not None and value < last_value:
+            anchor = chapter.timeline_anchor.lower()
+            if all(flag not in anchor for flag in ("闪回", "回忆", "flashback")):
+                raise ValueError(
+                    f"章节 {chapter.chapter_number} 的 timeline_anchor ({chapter.timeline_anchor}) 早于上一章且未标注闪回"
+                )
+        if value is not None:
+            last_value = value
+
+        for dep in chapter.dependencies:
+            if dep.chapter_number is not None and dep.chapter_number >= chapter.chapter_number:
+                raise ValueError(
+                    f"章节 {chapter.chapter_number} 的依赖 {dep.chapter_number} 不合法（不能依赖自身或未来章节）"
+                )
+
+    return outline
