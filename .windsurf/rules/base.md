@@ -67,3 +67,7 @@ novelgen/
 ## 项目运行
 
 1. 使用uv,不要直接使用系统默认的python
+
+## git操作
+
+1. commit msg使用中文描述

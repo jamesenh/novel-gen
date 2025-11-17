@@ -111,7 +111,7 @@ def get_llm(config: LLMConfig = None, verbose: bool = False):
         callbacks.append(VerboseCallbackHandler())
     
     extra_body = None
-    if config.base_url and "api-inference.modelscope.cn" in config.base_url:
+    if config.base_url and "api-inference.modelscope.cn" in config.base_url and "Qwen3-32B" in config.model_name:
         extra_body = {"enable_thinking": False}
     
     return ChatOpenAI(
