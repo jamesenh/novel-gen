@@ -8,9 +8,9 @@ from novelgen.runtime.orchestrator import NovelOrchestrator
 def demo_full_flow():
     """演示完整的小说生成流程"""
     # 创建编排器（verbose=True 将显示详细日志）
-    orchestrator = NovelOrchestrator(project_name="demo_003", verbose=False)
+    orchestrator = NovelOrchestrator(project_name="demo_004", verbose=False)
     print(f"项目目录: {orchestrator.project_dir}")
-    print("提示：重复运行会自动续写，已生成的阶段会跳过（如需重建可传入 force=True）。")
+    print("提示：重复运行会自动续写，已生成的阶段会跳过(如需重建可传入 force=True)。")
     
     # 步骤1: 创建世界观
     print("\n" + "="*60)
@@ -41,7 +41,7 @@ def demo_full_flow():
     print("\n" + "="*60)
     print("步骤4: 创建大纲")
     print("="*60)
-    outline = orchestrator.step4_create_outline(num_chapters=5)
+    outline = orchestrator.step4_create_outline(num_chapters=3)
     print(f"章节数: {len(outline.chapters)}")
 
     # print("\n" + "="*60)
@@ -49,24 +49,26 @@ def demo_full_flow():
     # print("="*60)
     # orchestrator.generate_all_chapters()
     
-    # 步骤5: 生成第一章计划
+    # 步骤5: 生成章节计划（演示全部章节生成）
     print("\n" + "="*60)
-    print("步骤5: 生成章节计划")
+    print("步骤5: 生成章节计划（全部章节）")
     print("="*60)
-    chapter_plan = orchestrator.step5_create_chapter_plan(chapter_number=[1, 2, 3, 4, 5])
-    # print(f"第1章: {chapter_plan.chapter_title}")
-    # print(f"场景数: {len(chapter_plan.scenes)}")
+    chapter_plans = orchestrator.step5_create_chapter_plan()  # 不传参数，自动生成全部章节
+    print(f"已生成 {len(chapter_plans)} 个章节计划")
     
-    # 步骤6: 生成第一章文本
+    # 步骤6: 生成章节文本（演示部分章节生成）
     print("\n" + "="*60)
-    print("步骤6: 生成章节文本")
+    print("步骤6: 生成章节文本（前2章）")
     print("="*60)
-    chapter = orchestrator.step6_generate_chapter_text(chapter_number=1)
-    chapter = orchestrator.step6_generate_chapter_text(chapter_number=2)
-    chapter = orchestrator.step6_generate_chapter_text(chapter_number=3)
-    chapter = orchestrator.step6_generate_chapter_text(chapter_number=4)
-    chapter = orchestrator.step6_generate_chapter_text(chapter_number=5)
-    # print(f"第1章完成，总字数: {chapter.total_words}")
+    orchestrator.generate_all_chapters(chapter_numbers=[1, 2])  # 只生成前2章
+    print("已生成第1-2章文本")
+    
+    # 可选：生成剩余章节
+    print("\n" + "="*60)
+    print("生成剩余章节文本")
+    print("="*60)
+    orchestrator.generate_all_chapters(chapter_numbers=[3])  # 生成第3章
+    print("已生成第3章文本")
     
     # print("\n" + "="*60)
     # print("🎉 演示完成！")

@@ -417,7 +417,7 @@ class NovelOrchestrator:
         print(f"✅ 大纲已保存: {self.config.outline_file}")
         return outline
 
-    def step5_create_chapter_plan(self, chapter_number: Union[int, List[int]], force: bool = False) -> Union[ChapterPlan, List[ChapterPlan]]:
+    def step5_create_chapter_plan(self, chapter_number: Union[int, List[int], None] = None, force: bool = False) -> Union[ChapterPlan, List[ChapterPlan]]:
         """
         步骤5: 创建章节计划（支持单个或多个章节）
 
@@ -429,7 +429,12 @@ class NovelOrchestrator:
             单个ChapterPlan对象或ChapterPlan对象列表
         """
         # 统一处理为列表
-        chapter_numbers = [chapter_number] if isinstance(chapter_number, int) else chapter_number
+        if chapter_number is None:
+            chapter_numbers = None
+        elif isinstance(chapter_number, int):
+            chapter_numbers = [chapter_number]
+        else:
+            chapter_numbers = chapter_number
 
         # 加载共享数据
         world = self.load_json(self.config.world_file, WorldSetting)
@@ -443,6 +448,9 @@ class NovelOrchestrator:
         assert world is not None
         assert characters is not None
         assert outline is not None
+
+        if chapter_numbers is None:
+            chapter_numbers = sorted(ch.chapter_number for ch in outline.chapters)
 
         results = []
 
@@ -619,14 +627,22 @@ class NovelOrchestrator:
 
         return chapter
 
-    def generate_all_chapters(self, force: bool = False):
+    def generate_all_chapters(self, chapter_numbers: Optional[List[int]] = None, force: bool = False):
         """生成所有章节"""
         outline = self.load_json(self.config.outline_file, Outline)
         if not outline:
             raise ValueError("大纲文件不存在，请先执行步骤4")
 
-        for chapter_summary in outline.chapters:
-            chapter_num = chapter_summary.chapter_number
+        if chapter_numbers is None:
+            target_numbers = [ch.chapter_number for ch in outline.chapters]
+        else:
+            valid_numbers = {ch.chapter_number for ch in outline.chapters}
+            for num in chapter_numbers:
+                if num not in valid_numbers:
+                    raise ValueError(f"章节{num}不存在于大纲中")
+            target_numbers = sorted(chapter_numbers)
+
+        for chapter_num in target_numbers:
 
             # 生成章节计划
             self.step5_create_chapter_plan(chapter_num, force=force)
@@ -634,7 +650,7 @@ class NovelOrchestrator:
             # 生成章节文本
             self.step6_generate_chapter_text(chapter_num, force=force)
 
-        print(f"\n🎉 全部{len(outline.chapters)}章已生成完毕！")
+        print(f"\n🎉 共{len(target_numbers)}章已生成完毕！")
 
     def export_chapter(self, chapter_number: int, output_path: Optional[str] = None):
         """
