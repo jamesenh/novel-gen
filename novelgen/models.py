@@ -203,3 +203,9 @@ class SceneMemoryContext(BaseModel):
     relevant_memories: List[StoryMemoryChunk] = Field(default_factory=list, description="相关记忆列表")
     timeline_context: Optional[Dict[str, Any]] = Field(default=None, description="时间线上下文")
     retrieval_timestamp: datetime = Field(description="检索时间戳")
+
+
+class MemoryRetrievalAnalysis(BaseModel):
+    """记忆检索分析结果，用于指导向量检索"""
+    search_queries: List[str] = Field(default_factory=list, description="用于向量检索的查询关键词列表")
+    key_entities: List[str] = Field(default_factory=list, description="需要重点关注的实体名称列表")

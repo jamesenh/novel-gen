@@ -81,7 +81,8 @@ class LLMConfig(BaseModel):
                 "scene_text_chain": {"model_name": "gpt-4", "max_tokens": 8000},
                 "chapter_memory_chain": {"model_name": "gpt-4o-mini", "max_tokens": 2000},
                 "consistency_chain": {"model_name": "gpt-4o-mini", "max_tokens": 4000},
-                "revision_chain": {"model_name": "gpt-4o-mini", "max_tokens": 8000}
+                "revision_chain": {"model_name": "gpt-4o-mini", "max_tokens": 8000},
+                "memory_context_chain": {"model_name": "gpt-4o-mini", "max_tokens": 1000}
             }
 
             if self.chain_name in default_configs:
@@ -208,6 +209,10 @@ class ProjectConfig(BaseModel):
     revision_chain_config: ChainConfig = Field(
         default_factory=lambda: ChainConfig(chain_name="revision_chain"),
         description="章节修订链配置"
+    )
+    memory_context_chain_config: ChainConfig = Field(
+        default_factory=lambda: ChainConfig(chain_name="memory_context_chain"),
+        description="记忆上下文检索链配置"
     )
 
     @property
