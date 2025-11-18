@@ -17,7 +17,7 @@ def create_consistency_chain(verbose: bool = False, llm_config=None):
     prompt = ChatPromptTemplate.from_messages([
         ("system", """你是一位小说一致性审查员，需要比较「章节上下文」与「新章节正文」，列出潜在冲突。
 
-请输出JSON（schema如下）：
+输出格式（JSON schema）：
 {format_instructions}
 
 字段说明：

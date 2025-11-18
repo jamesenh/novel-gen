@@ -111,8 +111,17 @@ def get_llm(config: LLMConfig = None, verbose: bool = False):
         callbacks.append(VerboseCallbackHandler())
     
     extra_body = None
-    if config.base_url and "api-inference.modelscope.cn" in config.base_url and "Qwen3-32B" in config.model_name:
-        extra_body = {"enable_thinking": False}
+    # 为阿里云ModelScope的所有Qwen模型设置enable_thinking=False
+    if config.base_url and "api-inference.modelscope.cn" in config.base_url:
+        import re
+        # 匹配所有Qwen系列模型
+        qwen_patterns = [
+            r"qwen.*",  # 通用qwen模型
+            r"Qwen.*",  # 大写开头的Qwen模型
+            r"Qwen3-\d+B",  # 原有的Qwen3模型
+        ]
+        if any(re.search(pattern, config.model_name or "", re.IGNORECASE) for pattern in qwen_patterns):
+            extra_body = {"enable_thinking": False}
     
     return ChatOpenAI(
         model=config.model_name,

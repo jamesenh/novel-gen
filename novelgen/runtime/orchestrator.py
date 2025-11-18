@@ -6,12 +6,14 @@
 """
 import os
 import json
-from typing import Optional, Union, List
+from typing import Optional, Union, List, Dict, Any
+from pathlib import Path
 
 from novelgen.models import (
     WorldSetting, ThemeConflict, CharactersConfig,
     Outline, ChapterPlan, GeneratedChapter, GeneratedScene,
-    ChapterSummary, ChapterMemoryEntry, ConsistencyReport, RevisionStatus
+    ChapterSummary, ChapterMemoryEntry, ConsistencyReport, RevisionStatus,
+    EntityStateSnapshot, StoryMemoryChunk
 )
 from novelgen.config import ProjectConfig
 from novelgen.chains.world_chain import generate_world
@@ -25,6 +27,8 @@ from novelgen.runtime.summary import summarize_scene, summarize_scenes
 from novelgen.runtime.memory import generate_chapter_memory_entry
 from novelgen.runtime.consistency import run_consistency_check
 from novelgen.chains.chapter_revision_chain import revise_chapter
+from novelgen.runtime.db import DatabaseManager
+from novelgen.runtime.vector_store import VectorStoreManager
 from datetime import datetime
 
 
@@ -32,13 +36,15 @@ class NovelOrchestrator:
     """小说生成编排器"""
 
     def __init__(self, project_name: str, base_dir: str = "projects", verbose: bool = False):
-        """
-        初始化编排器
+        """初始化编排器
 
         Args:
             project_name: 项目名称
             base_dir: 项目基础目录
             verbose: 是否启用详细日志（显示提示词、响应时间、token使用情况）
+
+        注意：
+            - 持久化相关配置在实例化时读取；如需变更配置，请创建新的 NovelOrchestrator 实例。
         """
         self.project_name = project_name
         self.project_dir = os.path.join(base_dir, project_name)
@@ -48,6 +54,57 @@ class NovelOrchestrator:
         # 创建项目目录
         os.makedirs(self.project_dir, exist_ok=True)
         os.makedirs(self.config.chapters_dir, exist_ok=True)
+
+        # 初始化持久化管理器
+        self.db_manager: Optional[DatabaseManager] = None
+        self.vector_manager: Optional[VectorStoreManager] = None
+
+        # 从配置中读取持久化设置（默认启用）
+        persistence_enabled = getattr(self.config, "persistence_enabled", True)
+        vector_store_enabled = getattr(self.config, "vector_store_enabled", True)
+
+        # 解析数据库和向量存储路径（支持配置覆盖）
+        project_path = Path(self.project_dir)
+
+        def _resolve_path(path_value: Optional[str], default: Path) -> Path:
+            """将配置值解析为绝对路径，支持相对于 project_dir 的相对路径。"""
+            if not path_value:
+                return default
+            candidate = Path(path_value)
+            if candidate.is_absolute():
+                return candidate
+            return project_path / candidate
+
+        db_path_config = getattr(self.config, "db_path", None)
+        vector_dir_config = getattr(self.config, "vector_store_dir", None)
+
+        if persistence_enabled:
+            try:
+                db_path = _resolve_path(db_path_config, project_path / "data" / "novel.db")
+                self.db_manager = DatabaseManager(db_path, enabled=True)
+                if self.db_manager.is_enabled():
+                    print(f"✅ 数据库持久化已启用: {db_path}")
+                else:
+                    print("⚠️ 数据库持久化初始化失败，将降级到非持久化模式")
+            except Exception as e:
+                print(f"⚠️ 数据库初始化异常，降级到非持久化模式: {e}")
+                self.db_manager = DatabaseManager(":memory:", enabled=False)
+        else:
+            print("ℹ️ 已通过配置关闭数据库持久化（ProjectConfig.persistence_enabled=False）")
+
+        if vector_store_enabled:
+            try:
+                vector_dir = _resolve_path(vector_dir_config, project_path / "data" / "vectors")
+                self.vector_manager = VectorStoreManager(vector_dir, enabled=True)
+                if self.vector_manager.is_enabled():
+                    print(f"✅ 向量存储已启用: {vector_dir}")
+                else:
+                    print("⚠️ 向量存储初始化失败，将降级到非持久化模式")
+            except Exception as e:
+                print(f"⚠️ 向量存储初始化异常，降级到非持久化模式: {e}")
+                self.vector_manager = VectorStoreManager(":memory:", enabled=False)
+        else:
+            print("ℹ️ 已通过配置关闭向量存储（ProjectConfig.vector_store_enabled=False）")
 
     def save_json(self, data, filepath: str):
         """保存JSON文件"""
@@ -272,6 +329,53 @@ class NovelOrchestrator:
                     f.write(revised_text)
                 print(f"📄 修订文本已导出至：{revision_txt_file}")
                 
+                # 同步更新数据库快照
+                print(f"💾 正在更新第{chapter_number}章的数据库快照...")
+                self._save_entity_snapshot("chapter_text", f"chapter_{chapter_number}_text", 
+                                          revised_chapter.model_dump(), chapter_number)
+                
+                # 重新生成场景摘要和聚合摘要
+                print(f"📝 正在重新生成第{chapter_number}章的摘要...")
+                scene_summaries = []
+                for scene in revised_chapter.scenes:
+                    scene_summary = self._summarize_scene_safe(scene)
+                    scene_summaries.append(f"场景{scene.scene_number}: {scene_summary}")
+                
+                aggregated_summary = self._summarize_chapter_safe(revised_chapter.scenes)
+                
+                # 重新生成并更新章节记忆
+                print(f"🧠 正在重新生成第{chapter_number}章的记忆条目...")
+                try:
+                    chapter_summary = self._get_chapter_summary(chapter_number)
+                    memory_entry = generate_chapter_memory_entry(
+                        chapter=revised_chapter,
+                        outline_summary=chapter_summary,
+                        scene_summaries=scene_summaries,
+                        aggregated_summary=aggregated_summary,
+                        verbose=self.verbose,
+                        llm_config=self.config.chapter_memory_chain_config.llm_config
+                    )
+                    self._append_chapter_memory_entry(memory_entry)
+                    print(f"✅ 第{chapter_number}章记忆条目已更新")
+                except Exception as mem_exc:
+                    print(f"⚠️ 更新章节记忆失败：{mem_exc}")
+                
+                # 更新向量存储：先删除旧记忆，再添加新记忆
+                print(f"🔄 正在更新第{chapter_number}章的向量存储...")
+                try:
+                    # 删除该章节的旧向量记忆
+                    self._delete_chapter_vector_memory(chapter_number)
+                    # 添加修订后的新向量记忆
+                    for scene in revised_chapter.scenes:
+                        self._save_scene_content_to_vector(
+                            scene.content, 
+                            chapter_number, 
+                            scene.scene_number
+                        )
+                    print(f"✅ 第{chapter_number}章向量存储已更新")
+                except Exception as vec_exc:
+                    print(f"⚠️ 更新向量存储失败：{vec_exc}")
+                
                 return revised_chapter
                 
             except Exception as exc:
@@ -355,6 +459,98 @@ class NovelOrchestrator:
         except Exception as exc:
             snippets = [scene.content[:80] for scene in scenes]
             return f"自动总结失败({exc})。片段汇总：{' '.join(snippets)}"
+    def _save_entity_snapshot(self, entity_type: str, entity_id: str, state_data: Dict[str, Any], 
+                          chapter_index: Optional[int] = None, scene_index: Optional[int] = None):
+        """保存实体状态快照到数据库"""
+        if not self.db_manager or not self.db_manager.is_enabled():
+            return
+        
+        try:
+            snapshot = EntityStateSnapshot(
+                project_id=self.project_name,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                chapter_index=chapter_index,
+                scene_index=scene_index,
+                timestamp=datetime.now(),
+                state_data=state_data
+            )
+            self.db_manager.save_entity_snapshot(snapshot)
+        except Exception as e:
+            print(f"⚠️ 保存实体状态快照失败: {e}")
+    
+    def _save_scene_content_to_vector(self, content: str, chapter_index: int, scene_index: int, 
+                                     content_type: str = "scene"):
+        """保存场景内容到向量存储和数据库"""
+        if not self.vector_manager or not self.vector_manager.is_enabled():
+            return
+        
+        try:
+            # 保存到向量存储，并获取创建的记忆块
+            chunks = self.vector_manager.add_scene_content(
+                content=content,
+                project_id=self.project_name,
+                chapter_index=chapter_index,
+                scene_index=scene_index
+            )
+            
+            # 同时保存到数据库的 memory_chunks 表
+            if chunks and self.db_manager and self.db_manager.is_enabled():
+                for chunk in chunks:
+                    self.db_manager.save_memory_chunk(chunk)
+                print(f"已将{len(chunks)}个记忆块保存到数据库")
+                
+        except Exception as e:
+            print(f"⚠️ 保存场景内容到向量存储失败: {e}")
+    
+    def _delete_chapter_vector_memory(self, chapter_index: int):
+        """删除指定章节的所有向量记忆和数据库记录"""
+        # 1. 从向量库删除
+        if self.vector_manager and self.vector_manager.is_enabled():
+            try:
+                # 获取该章节的所有记忆块
+                chunks = self.vector_manager.get_chunks_by_project(
+                    project_id=self.project_name,
+                    chapter_index=chapter_index
+                )
+                
+                if chunks and self.vector_manager.vector_store:
+                    # 删除向量库中的记忆块
+                    chunk_ids = [chunk.chunk_id for chunk in chunks]
+                    self.vector_manager.vector_store.collection.delete(ids=chunk_ids)
+                    print(f"已从向量库删除第{chapter_index}章的{len(chunk_ids)}个记忆块")
+            except Exception as e:
+                print(f"⚠️ 删除章节向量记忆失败: {e}")
+        
+        # 2. 从数据库删除
+        if self.db_manager and self.db_manager.is_enabled():
+            try:
+                # 直接通过SQL删除该章节的所有记忆块
+                with self.db_manager.get_connection() as conn:
+                    cursor = conn.execute(
+                        "DELETE FROM memory_chunks WHERE project_id = ? AND chapter_index = ?",
+                        (self.project_name, chapter_index)
+                    )
+                    deleted_count = cursor.rowcount
+                    conn.commit()
+                    print(f"已从数据库删除第{chapter_index}章的{deleted_count}个记忆块记录")
+            except Exception as e:
+                print(f"⚠️ 删除章节数据库记忆记录失败: {e}")
+    
+    def close(self):
+        """关闭持久化连接"""
+        if self.db_manager:
+            try:
+                self.db_manager.close()
+            except Exception as e:
+                print(f"⚠️ 关闭数据库连接失败: {e}")
+        
+        if self.vector_manager:
+            try:
+                self.vector_manager.close()
+            except Exception as e:
+                print(f"⚠️ 关闭向量存储连接失败: {e}")
+
     def _maybe_use_existing(self, filepath: str, model_class, force: bool, entity_name: str):
         """
         检查是否已有生成结果
@@ -400,6 +596,10 @@ class NovelOrchestrator:
         )
         self.save_json(world, self.config.world_file)
         print(f"✅ 世界观已保存: {self.config.world_file}")
+        
+        # 保存世界观状态快照到数据库
+        self._save_entity_snapshot("world", "main_world", world.model_dump())
+        
         return world
 
     def step2_create_theme_conflict(self, user_input: str = "", force: bool = False) -> ThemeConflict:
@@ -431,6 +631,10 @@ class NovelOrchestrator:
         )
         self.save_json(theme_conflict, self.config.theme_conflict_file)
         print(f"✅ 主题冲突已保存: {self.config.theme_conflict_file}")
+        
+        # 保存主题冲突状态快照到数据库
+        self._save_entity_snapshot("theme", "main_theme", theme_conflict.model_dump())
+        
         return theme_conflict
 
     def step3_create_characters(self, force: bool = False) -> CharactersConfig:
@@ -461,6 +665,20 @@ class NovelOrchestrator:
         )
         self.save_json(characters, self.config.characters_file)
         print(f"✅ 角色已保存: {self.config.characters_file}")
+        
+        # 保存角色状态快照到数据库
+        self._save_entity_snapshot("characters", "main_characters", characters.model_dump())
+        
+        # 为每个角色保存单独的状态快照
+        # 保存主角
+        self._save_entity_snapshot("character", characters.protagonist.name, characters.protagonist.model_dump())
+        # 保存反派（如果存在）
+        if characters.antagonist:
+            self._save_entity_snapshot("character", characters.antagonist.name, characters.antagonist.model_dump())
+        # 保存配角
+        for character in characters.supporting_characters:
+            self._save_entity_snapshot("character", character.name, character.model_dump())
+        
         return characters
 
     def step4_create_outline(self, num_chapters: int = 20, force: bool = False) -> Outline:
@@ -502,6 +720,15 @@ class NovelOrchestrator:
         )
         self.save_json(outline, self.config.outline_file)
         print(f"✅ 大纲已保存: {self.config.outline_file}")
+        
+        # 保存大纲状态快照到数据库
+        self._save_entity_snapshot("outline", "main_outline", outline.model_dump())
+        
+        # 为每个章节保存单独的状态快照
+        for chapter in outline.chapters:
+            self._save_entity_snapshot("chapter", f"chapter_{chapter.chapter_number}", 
+                                      chapter.model_dump(), chapter.chapter_number)
+        
         return outline
 
     def step5_create_chapter_plan(self, chapter_number: Union[int, List[int], None] = None, force: bool = False) -> Union[ChapterPlan, List[ChapterPlan]]:
@@ -588,6 +815,11 @@ class NovelOrchestrator:
             # 保存章节计划
             self.save_json(chapter_plan, plan_file)
             print(f"✅ 第{num}章计划已保存: {plan_file}")
+            
+            # 保存章节计划状态快照到数据库
+            self._save_entity_snapshot("chapter_plan", f"chapter_{num}_plan", 
+                                      chapter_plan.model_dump(), num)
+            
             results.append(chapter_plan)
 
         # 根据输入类型返回结果
@@ -662,6 +894,9 @@ class NovelOrchestrator:
             )
             scenes.append(scene)
 
+            # 保存场景内容到向量存储
+            self._save_scene_content_to_vector(scene.content, chapter_number, scene.scene_number)
+
             # 更新前文概要
             print(f"    📝 正在生成场景{scene.scene_number}摘要...")
             scene_summary = self._summarize_scene_safe(scene)
@@ -684,6 +919,10 @@ class NovelOrchestrator:
         # 保存章节文本
         self.save_json(chapter, text_file)
         print(f"✅ 章节文本已保存: {text_file}")
+        
+        # 保存章节状态快照到数据库
+        self._save_entity_snapshot("chapter_text", f"chapter_{chapter_number}_text", 
+                                  chapter.model_dump(), chapter_number)
 
         # 更新章节记忆
         print(f"🧠 正在为第{chapter_number}章生成记忆条目...")

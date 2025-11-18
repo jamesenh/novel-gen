@@ -112,13 +112,35 @@ class ChainConfig(BaseModel):
 
 
 class ProjectConfig(BaseModel):
-    """项目配置"""
+    """项目配置
+
+    注意：
+    - 持久化相关行为可以通过 ProjectConfig 字段或环境变量控制；
+    - 默认情况下会启用数据持久化和向量存储，并将数据写入 project_dir/data 下。
+    """
+
     project_dir: str = Field(description="项目目录")
     author: str = Field(default="Jamesenh", description="作者名称")
     memory_context_chapters: int = Field(default=3, description="构建章节上下文时参考的最近章节数量")
     revision_policy: Literal["none", "auto_apply", "manual_confirm"] = Field(
         default="none",
         description="章节修订策略：none(不修订), auto_apply(自动应用), manual_confirm(人工确认)"
+    )
+    persistence_enabled: bool = Field(
+        default=True,
+        description="是否启用数据持久化。可通过环境变量 NOVELGEN_PERSISTENCE_ENABLED 控制。",
+    )
+    vector_store_enabled: bool = Field(
+        default=True,
+        description="是否启用向量存储。可通过环境变量 NOVELGEN_VECTOR_STORE_ENABLED 控制。",
+    )
+    db_path: Optional[str] = Field(
+        default=None,
+        description="数据库文件路径，可以是绝对路径或相对于 project_dir 的相对路径；默认使用 project_dir/data/novel.db。",
+    )
+    vector_store_dir: Optional[str] = Field(
+        default=None,
+        description="向量存储持久化目录，可以是绝对路径或相对于 project_dir 的相对路径；默认使用 project_dir/data/vectors。",
     )
 
     def __init__(self, **data):
@@ -127,6 +149,27 @@ class ProjectConfig(BaseModel):
             env_policy = os.getenv("NOVELGEN_REVISION_POLICY", "none")
             if env_policy in ("none", "auto_apply", "manual_confirm"):
                 data["revision_policy"] = env_policy
+
+        # 从环境变量读取持久化开关（如果未在参数中提供）
+        if "persistence_enabled" not in data:
+            env_persistence = os.getenv("NOVELGEN_PERSISTENCE_ENABLED", "true")
+            data["persistence_enabled"] = env_persistence.lower() in ("true", "1", "yes", "on")
+
+        if "vector_store_enabled" not in data:
+            env_vector = os.getenv("NOVELGEN_VECTOR_STORE_ENABLED", "true")
+            data["vector_store_enabled"] = env_vector.lower() in ("true", "1", "yes", "on")
+
+        # 从环境变量读取数据库路径和向量存储目录（如果未在参数中提供）
+        if "db_path" not in data:
+            env_db_path = os.getenv("NOVELGEN_DB_PATH")
+            if env_db_path:
+                data["db_path"] = env_db_path
+
+        if "vector_store_dir" not in data:
+            env_vector_dir = os.getenv("NOVELGEN_VECTOR_STORE_DIR")
+            if env_vector_dir:
+                data["vector_store_dir"] = env_vector_dir
+
         super().__init__(**data)
 
     # 各个链的配置，设置不同的chain_name
