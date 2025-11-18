@@ -7,7 +7,6 @@
 import os
 import json
 from typing import Optional, Union, List, Dict, Any
-from pathlib import Path
 
 from novelgen.models import (
     WorldSetting, ThemeConflict, CharactersConfig,
@@ -63,24 +62,9 @@ class NovelOrchestrator:
         persistence_enabled = getattr(self.config, "persistence_enabled", True)
         vector_store_enabled = getattr(self.config, "vector_store_enabled", True)
 
-        # 解析数据库和向量存储路径（支持配置覆盖）
-        project_path = Path(self.project_dir)
-
-        def _resolve_path(path_value: Optional[str], default: Path) -> Path:
-            """将配置值解析为绝对路径，支持相对于 project_dir 的相对路径。"""
-            if not path_value:
-                return default
-            candidate = Path(path_value)
-            if candidate.is_absolute():
-                return candidate
-            return project_path / candidate
-
-        db_path_config = getattr(self.config, "db_path", None)
-        vector_dir_config = getattr(self.config, "vector_store_dir", None)
-
         if persistence_enabled:
             try:
-                db_path = _resolve_path(db_path_config, project_path / "data" / "novel.db")
+                db_path = self.config.get_db_path()
                 self.db_manager = DatabaseManager(db_path, enabled=True)
                 if self.db_manager.is_enabled():
                     print(f"✅ 数据库持久化已启用: {db_path}")
@@ -94,10 +78,17 @@ class NovelOrchestrator:
 
         if vector_store_enabled:
             try:
-                vector_dir = _resolve_path(vector_dir_config, project_path / "data" / "vectors")
-                self.vector_manager = VectorStoreManager(vector_dir, enabled=True)
+                vector_dir = self.config.get_vector_store_dir()
+                embedding_config = getattr(self.config, "embedding_config", None)
+                self.vector_manager = VectorStoreManager(
+                    vector_dir, 
+                    enabled=True,
+                    embedding_config=embedding_config
+                )
                 if self.vector_manager.is_enabled():
                     print(f"✅ 向量存储已启用: {vector_dir}")
+                    if embedding_config:
+                        print(f"   使用 embedding 模型: {embedding_config.model_name}")
                 else:
                     print("⚠️ 向量存储初始化失败，将降级到非持久化模式")
             except Exception as e:
@@ -884,19 +875,42 @@ class NovelOrchestrator:
         for scene_plan in chapter_plan.scenes:
             print(f"  生成场景 {scene_plan.scene_number}...")
 
-            # 尝试加载场景记忆上下文（如存在）
+            # 检索场景记忆上下文
             scene_memory_context = None
             memory_file = os.path.join(
                 self.project_dir,
                 f"scene_{chapter_number}_{scene_plan.scene_number}_memory.json"
             )
+            
+            # 首先尝试加载已存在的记忆上下文
             if os.path.exists(memory_file):
                 try:
                     raw_context = self.load_json(memory_file)
                     if isinstance(raw_context, dict):
                         scene_memory_context = SceneMemoryContext(**raw_context)
+                        print(f"    📋 已加载场景{scene_plan.scene_number}的记忆上下文")
                 except Exception as exc:
-                    print(f"⚠️ 场景记忆上下文解析失败，将忽略：{exc}")
+                    print(f"⚠️ 场景记忆上下文解析失败，将重新生成：{exc}")
+            
+            # 如果没有已存在的记忆上下文，则生成新的
+            if scene_memory_context is None:
+                try:
+                    from novelgen.chains.memory_context_chain import retrieve_scene_memory_context
+                    scene_memory_context = retrieve_scene_memory_context(
+                        scene_plan=scene_plan,
+                        characters_config=characters,
+                        project_id=self.project_name,
+                        chapter_index=chapter_number,
+                        scene_index=scene_plan.scene_number,
+                        db_manager=self.db_manager,
+                        vector_manager=self.vector_manager,
+                        llm_config=self.config.memory_context_chain_config.llm_config,
+                        output_dir=self.project_dir
+                    )
+                    print(f"    🧠 已为场景{scene_plan.scene_number}生成记忆上下文")
+                except Exception as exc:
+                    print(f"⚠️ 场景记忆上下文生成失败，将忽略：{exc}")
+                    scene_memory_context = None
 
             scene = generate_scene_text(
                 scene_plan,

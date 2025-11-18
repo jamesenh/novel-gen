@@ -13,7 +13,7 @@ from datetime import datetime
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from novelgen.runtime.vector_store import VectorStoreManager
-from novelgen.config import Settings
+from novelgen.config import ProjectConfig
 
 
 def format_timestamp(ts: datetime) -> str:
@@ -51,12 +51,17 @@ def print_memory_chunk(chunk, index: int, total: int, verbose: bool = False):
 
 
 def query_scene_memory(project_id: str, chapter_index: int, scene_index: int,
-                       vector_store_path: str, limit: int = 10, verbose: bool = False):
+                       vector_store_path: str, embedding_config = None, 
+                       limit: int = 10, verbose: bool = False):
     """查询场景相关的记忆块"""
     print(f"\n正在查询项目 '{project_id}' 章节 {chapter_index} 场景 {scene_index} 的记忆块...")
     
     # 初始化向量存储管理器
-    vector_manager = VectorStoreManager(persist_directory=vector_store_path, enabled=True)
+    vector_manager = VectorStoreManager(
+        persist_directory=vector_store_path, 
+        enabled=True,
+        embedding_config=embedding_config
+    )
     
     if not vector_manager.is_enabled():
         print("❌ 错误: 向量存储未能成功初始化")
@@ -87,7 +92,8 @@ def query_scene_memory(project_id: str, chapter_index: int, scene_index: int,
 
 
 def query_by_entity(project_id: str, entity_ids: list, chapter_index: int = None,
-                    vector_store_path: str = None, limit: int = 10, verbose: bool = False):
+                    vector_store_path: str = None, embedding_config = None,
+                    limit: int = 10, verbose: bool = False):
     """根据实体ID查询相关记忆块"""
     entity_str = ', '.join(entity_ids)
     print(f"\n正在查询项目 '{project_id}' 中与实体 [{entity_str}] 相关的记忆块...")
@@ -95,7 +101,11 @@ def query_by_entity(project_id: str, entity_ids: list, chapter_index: int = None
         print(f"限定章节: {chapter_index}")
     
     # 初始化向量存储管理器
-    vector_manager = VectorStoreManager(persist_directory=vector_store_path, enabled=True)
+    vector_manager = VectorStoreManager(
+        persist_directory=vector_store_path, 
+        enabled=True,
+        embedding_config=embedding_config
+    )
     
     if not vector_manager.is_enabled():
         print("❌ 错误: 向量存储未能成功初始化")
@@ -121,7 +131,8 @@ def query_by_entity(project_id: str, entity_ids: list, chapter_index: int = None
 
 def search_memory(project_id: str, query: str, vector_store_path: str,
                  content_type: str = None, entities: list = None,
-                 tags: list = None, limit: int = 10, verbose: bool = False):
+                 tags: list = None, embedding_config = None,
+                 limit: int = 10, verbose: bool = False):
     """搜索记忆块"""
     print(f"\n正在搜索项目 '{project_id}' 中的记忆块...")
     print(f"查询: {query}")
@@ -133,7 +144,11 @@ def search_memory(project_id: str, query: str, vector_store_path: str,
         print(f"标签过滤: {', '.join(tags)}")
     
     # 初始化向量存储管理器
-    vector_manager = VectorStoreManager(persist_directory=vector_store_path, enabled=True)
+    vector_manager = VectorStoreManager(
+        persist_directory=vector_store_path, 
+        enabled=True,
+        embedding_config=embedding_config
+    )
     
     if not vector_manager.is_enabled():
         print("❌ 错误: 向量存储未能成功初始化")
@@ -198,14 +213,18 @@ def main():
     
     args = parser.parse_args()
     
-    # 确定向量存储路径
+    # 确定向量存储路径和embedding配置
     if args.vector_store:
         vector_store_path = args.vector_store
+        embedding_config = None  # 使用默认配置
     else:
-        settings = Settings()
-        vector_store_path = settings.vector_store_path
+        config = ProjectConfig(project_dir=f"projects/{args.project_id}")
+        vector_store_path = config.get_vector_store_dir()
+        embedding_config = config.embedding_config
     
     print(f"使用向量存储: {vector_store_path}")
+    if embedding_config:
+        print(f"使用 embedding 模型: {embedding_config.model_name}")
     
     # 执行查询
     try:
@@ -215,18 +234,18 @@ def main():
                 return 1
             return query_scene_memory(
                 args.project_id, args.chapter, args.scene_index,
-                vector_store_path, args.limit, args.verbose
+                vector_store_path, embedding_config, args.limit, args.verbose
             )
         elif args.entity:
             return query_by_entity(
                 args.project_id, args.entity, args.chapter,
-                vector_store_path, args.limit, args.verbose
+                vector_store_path, embedding_config, args.limit, args.verbose
             )
         elif args.search:
             return search_memory(
                 args.project_id, args.search, vector_store_path,
                 args.content_type, args.entities, args.tags,
-                args.limit, args.verbose
+                embedding_config, args.limit, args.verbose
             )
     except KeyboardInterrupt:
         print("\n\n⚠️  用户中断")

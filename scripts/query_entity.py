@@ -13,7 +13,7 @@ from datetime import datetime
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from novelgen.runtime.db import DatabaseManager
-from novelgen.config import Settings
+from novelgen.config import ProjectConfig
 
 
 def format_timestamp(ts: datetime) -> str:
@@ -144,8 +144,8 @@ def main():
     if args.db:
         db_path = args.db
     else:
-        settings = Settings()
-        db_path = settings.db_path
+        config = ProjectConfig(project_dir=f"projects/{args.project_id}")
+        db_path = config.get_db_path()
     
     print(f"使用数据库: {db_path}")
     

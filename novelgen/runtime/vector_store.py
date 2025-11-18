@@ -18,6 +18,79 @@ from novelgen.models import StoryMemoryChunk
 logger = logging.getLogger(__name__)
 
 
+# LangChain embedding 相关导入
+try:
+    from langchain_openai import OpenAIEmbeddings
+    LANGCHAIN_EMBEDDINGS_AVAILABLE = True
+except ImportError:
+    LANGCHAIN_EMBEDDINGS_AVAILABLE = False
+    logger.warning("langchain-openai未安装，无法使用OpenAI embeddings")
+
+
+class LangChainEmbeddingAdapter:
+    """
+    LangChain Embeddings 适配器
+    将 LangChain 的 Embeddings 接口适配到 ChromaDB 的 EmbeddingFunction 接口
+    """
+    
+    def __init__(self, langchain_embeddings):
+        """
+        Args:
+            langchain_embeddings: LangChain Embeddings 实例（如 OpenAIEmbeddings）
+        """
+        self.langchain_embeddings = langchain_embeddings
+    
+    def __call__(self, input: List[str]) -> List[List[float]]:
+        """
+        ChromaDB EmbeddingFunction 接口要求的调用方法（用于批量文档嵌入）
+        
+        Args:
+            input: 文本列表
+            
+        Returns:
+            嵌入向量列表
+        """
+        try:
+            # 使用 LangChain 的 embed_documents 方法
+            embeddings = self.langchain_embeddings.embed_documents(input)
+            return embeddings
+        except Exception as e:
+            logger.error(f"Embedding生成失败: {e}")
+            raise
+    
+    def embed_query(self, text=None, input=None):
+        """
+        ChromaDB 查询时需要的方法（用于单个查询文本嵌入）
+        
+        Args:
+            text: 查询文本（可以是 str 或 list）
+            input: 查询文本（ChromaDB 可能使用此参数名）
+            
+        Returns:
+            嵌入向量列表（ChromaDB 期望 List[List[float]] 格式）
+        """
+        try:
+            # 兼容两种参数名
+            query_input = text if text is not None else input
+            if query_input is None:
+                raise ValueError("必须提供 text 或 input 参数")
+            
+            # 处理 list 类型（ChromaDB 查询时会传递 list）
+            if isinstance(query_input, list):
+                # 使用 embed_documents 处理列表
+                # 返回格式：List[List[float]]
+                embeddings = self.langchain_embeddings.embed_documents(query_input)
+                return embeddings
+            else:
+                # 字符串类型 - 返回嵌套列表格式以兼容 ChromaDB
+                embedding = self.langchain_embeddings.embed_query(query_input)
+                return [embedding]  # 包装成列表
+                
+        except Exception as e:
+            logger.error(f"查询embedding生成失败: {e}")
+            raise
+
+
 class VectorStoreInterface(ABC):
     """向量存储操作抽象接口"""
     
@@ -161,14 +234,18 @@ except ImportError:
 class ChromaVectorStore(VectorStoreInterface):
     """Chroma向量存储实现"""
     
-    def __init__(self, persist_directory: Union[str, Path], collection_name: str = "novel_memories"):
+    def __init__(self, persist_directory: Union[str, Path], 
+                 collection_name: str = "novel_memories",
+                 embedding_config: Optional['EmbeddingConfig'] = None):
         if not CHROMA_AVAILABLE:
             raise ImportError("ChromaDB未安装，请运行: pip install chromadb")
         
         self.persist_directory = Path(persist_directory)
         self.collection_name = collection_name
+        self.embedding_config = embedding_config
         self.client: Optional[chromadb.Client] = None
         self.collection: Optional[chromadb.Collection] = None
+        self.embedding_function = None
     
     def initialize(self) -> bool:
         """初始化Chroma向量存储"""
@@ -183,14 +260,53 @@ class ChromaVectorStore(VectorStoreInterface):
             # 创建客户端
             self.client = chromadb.PersistentClient(path=str(self.persist_directory))
             
+            # 创建 embedding function
+            if self.embedding_config and LANGCHAIN_EMBEDDINGS_AVAILABLE:
+                try:
+                    # 使用 LangChain 1.0 的 OpenAIEmbeddings
+                    kwargs = {
+                        "model": self.embedding_config.model_name,
+                    }
+                    
+                    if self.embedding_config.api_key:
+                        kwargs["api_key"] = self.embedding_config.api_key
+                    if self.embedding_config.base_url:
+                        kwargs["base_url"] = self.embedding_config.base_url
+                    if self.embedding_config.dimensions:
+                        kwargs["dimensions"] = self.embedding_config.dimensions
+                    
+                    # ModelScope API 需要 encoding_format 参数
+                    # 设置为 'float' 以获取浮点数格式的向量
+                    kwargs["model_kwargs"] = {"encoding_format": "float"}
+                    
+                    # 设置 chunk_size=1 避免 LangChain 批处理时的索引错误
+                    # 这是因为 ModelScope API 的响应格式与 OpenAI 标准格式略有差异
+                    kwargs["chunk_size"] = 1
+                    
+                    langchain_embeddings = OpenAIEmbeddings(**kwargs)
+                    self.embedding_function = LangChainEmbeddingAdapter(langchain_embeddings)
+                    logger.info(f"使用自定义 embedding 模型: {self.embedding_config.model_name}")
+                except Exception as e:
+                    logger.warning(f"创建自定义 embedding 失败，将使用默认模型: {e}")
+                    self.embedding_function = None
+            else:
+                logger.info("使用 ChromaDB 默认 embedding 模型")
+                self.embedding_function = None
+            
             # 获取或创建集合
             try:
-                self.collection = self.client.get_collection(self.collection_name)
+                self.collection = self.client.get_collection(
+                    name=self.collection_name,
+                    embedding_function=self.embedding_function
+                )
+                logger.info(f"获取已存在的集合: {self.collection_name}")
             except Exception:
                 self.collection = self.client.create_collection(
                     name=self.collection_name,
+                    embedding_function=self.embedding_function,
                     metadata={"description": "NovelGen故事记忆向量存储"}
                 )
+                logger.info(f"创建新集合: {self.collection_name}")
             
             logger.info(f"Chroma向量存储初始化成功: {self.persist_directory}")
             return True
@@ -512,14 +628,27 @@ class ChromaVectorStore(VectorStoreInterface):
 class VectorStoreManager:
     """向量存储管理器，提供降级和错误处理"""
     
-    def __init__(self, persist_directory: Union[str, Path], enabled: bool = True):
+    def __init__(self, persist_directory: Union[str, Path], 
+                 enabled: bool = True,
+                 embedding_config: Optional['EmbeddingConfig'] = None):
         self.enabled = enabled
         self.vector_store: Optional[VectorStoreInterface] = None
-        self.chunker = TextChunker()
+        
+        # 如果提供了 embedding_config，使用其中的分块配置
+        if embedding_config:
+            self.chunker = TextChunker(
+                chunk_size=embedding_config.chunk_size,
+                overlap=embedding_config.chunk_overlap
+            )
+        else:
+            self.chunker = TextChunker()
         
         if self.enabled:
             try:
-                self.vector_store = ChromaVectorStore(persist_directory)
+                self.vector_store = ChromaVectorStore(
+                    persist_directory=persist_directory,
+                    embedding_config=embedding_config
+                )
                 if not self.vector_store.initialize():
                     logger.warning("向量存储初始化失败，降级到非持久化模式")
                     self.enabled = False

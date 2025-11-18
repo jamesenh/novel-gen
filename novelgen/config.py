@@ -17,6 +17,41 @@ for _env_filename in (".env.local", ".env"):
         load_dotenv(_env_path, override=True)
 
 
+class EmbeddingConfig(BaseModel):
+    """Embedding模型配置"""
+    model_name: Optional[str] = Field(default=None, description="Embedding模型名称")
+    api_key: Optional[str] = Field(default=None, description="API密钥")
+    base_url: Optional[str] = Field(default=None, description="API基础URL")
+    dimensions: Optional[int] = Field(default=None, description="向量维度（某些模型支持）")
+    chunk_size: int = Field(default=500, description="文本分块大小")
+    chunk_overlap: int = Field(default=50, description="文本分块重叠大小")
+
+    def __init__(self, **data):
+        super().__init__(**data)
+        
+        # 从环境变量读取配置（环境变量优先级高于传入参数）
+        # 如果参数未提供，尝试从环境变量读取
+        if self.api_key is None:
+            self.api_key = os.getenv("EMBEDDING_API_KEY") or os.getenv("OPENAI_API_KEY")
+        if self.base_url is None:
+            self.base_url = os.getenv("EMBEDDING_BASE_URL") or os.getenv("OPENAI_API_BASE")
+        
+        # model_name 特殊处理：优先使用环境变量，如果都没有则使用默认值
+        env_model = os.getenv("EMBEDDING_MODEL_NAME")
+        if env_model:
+            self.model_name = env_model
+        elif self.model_name is None:
+            self.model_name = "text-embedding-3-small"
+        
+        # 读取可选配置
+        if self.dimensions is None and os.getenv("EMBEDDING_DIMENSIONS"):
+            self.dimensions = int(os.getenv("EMBEDDING_DIMENSIONS"))
+        if os.getenv("EMBEDDING_CHUNK_SIZE"):
+            self.chunk_size = int(os.getenv("EMBEDDING_CHUNK_SIZE"))
+        if os.getenv("EMBEDDING_CHUNK_OVERLAP"):
+            self.chunk_overlap = int(os.getenv("EMBEDDING_CHUNK_OVERLAP"))
+
+
 class LLMConfig(BaseModel):
     """LLM配置"""
     chain_name: Optional[str] = Field(default=None, description="链名称，用于读取链特定的环境变量")
@@ -214,6 +249,10 @@ class ProjectConfig(BaseModel):
         default_factory=lambda: ChainConfig(chain_name="memory_context_chain"),
         description="记忆上下文检索链配置"
     )
+    embedding_config: EmbeddingConfig = Field(
+        default_factory=EmbeddingConfig,
+        description="Embedding模型配置"
+    )
 
     @property
     def world_file(self) -> str:
@@ -242,3 +281,25 @@ class ProjectConfig(BaseModel):
     @property
     def consistency_report_file(self) -> str:
         return os.path.join(self.project_dir, "consistency_reports.json")
+
+    def get_db_path(self) -> str:
+        """获取数据库文件路径，如果未设置则返回默认路径"""
+        if self.db_path:
+            # 如果是绝对路径，直接返回
+            if os.path.isabs(self.db_path):
+                return self.db_path
+            # 如果是相对路径，相对于 project_dir
+            return os.path.join(self.project_dir, self.db_path)
+        # 默认使用 project_dir/data/novel.db
+        return os.path.join(self.project_dir, "data", "novel.db")
+
+    def get_vector_store_dir(self) -> str:
+        """获取向量存储目录路径，如果未设置则返回默认路径"""
+        if self.vector_store_dir:
+            # 如果是绝对路径，直接返回
+            if os.path.isabs(self.vector_store_dir):
+                return self.vector_store_dir
+            # 如果是相对路径，相对于 project_dir
+            return os.path.join(self.project_dir, self.vector_store_dir)
+        # 默认使用 project_dir/data/vectors
+        return os.path.join(self.project_dir, "data", "vectors")
