@@ -13,7 +13,7 @@ from novelgen.models import (
     WorldSetting, ThemeConflict, CharactersConfig,
     Outline, ChapterPlan, GeneratedChapter, GeneratedScene,
     ChapterSummary, ChapterMemoryEntry, ConsistencyReport, RevisionStatus,
-    EntityStateSnapshot, StoryMemoryChunk
+    EntityStateSnapshot, StoryMemoryChunk, SceneMemoryContext
 )
 from novelgen.config import ProjectConfig
 from novelgen.chains.world_chain import generate_world
@@ -883,12 +883,28 @@ class NovelOrchestrator:
 
         for scene_plan in chapter_plan.scenes:
             print(f"  生成场景 {scene_plan.scene_number}...")
+
+            # 尝试加载场景记忆上下文（如存在）
+            scene_memory_context = None
+            memory_file = os.path.join(
+                self.project_dir,
+                f"scene_{chapter_number}_{scene_plan.scene_number}_memory.json"
+            )
+            if os.path.exists(memory_file):
+                try:
+                    raw_context = self.load_json(memory_file)
+                    if isinstance(raw_context, dict):
+                        scene_memory_context = SceneMemoryContext(**raw_context)
+                except Exception as exc:
+                    print(f"⚠️ 场景记忆上下文解析失败，将忽略：{exc}")
+
             scene = generate_scene_text(
                 scene_plan,
                 world,
                 characters,
                 previous_summary,
                 chapter_context=chapter_context_payload,
+                scene_memory_context=scene_memory_context,
                 verbose=self.verbose,
                 llm_config=self.config.scene_text_chain_config.llm_config
             )

@@ -2,9 +2,17 @@
 场景文本生成链
 根据场景计划生成实际的小说文本
 """
+from typing import Optional
+
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
-from novelgen.models import GeneratedScene, ScenePlan, WorldSetting, CharactersConfig
+from novelgen.models import (
+    GeneratedScene,
+    ScenePlan,
+    WorldSetting,
+    CharactersConfig,
+    SceneMemoryContext,
+)
 from novelgen.llm import get_llm
 from novelgen.chains.output_fixing import LLMJsonRepairOutputParser
 
@@ -40,6 +48,11 @@ def create_scene_text_chain(verbose: bool = False, llm_config=None):
 【章节上下文】
 章节上下文提供最近若干章的关键状态及未决悬念。生成文本必须与其一致，若要引入新设定，需要在正文中给出合理解释。
 
+【场景记忆上下文（如有）】
+如果提供了结构化的场景记忆上下文（SceneMemoryContext），其中的实体状态(entity_states)、近期事件与记忆片段(recent_events/relevant_memories，如果存在)应被视为约束性信息：
+- 不得无故推翻其中已经确立的事实（例如已死亡角色突然出现、地点/时间与记忆严重冲突）
+- 如需改变角色状态或关系，必须在剧情中给出清晰的过程与合理解释
+
 【避免套路化】
 - 避免陈词滥调和重复性的外貌/神态描写
 - 同一人物多次出场时，变换描写角度和侧重点
@@ -68,6 +81,9 @@ def create_scene_text_chain(verbose: bool = False, llm_config=None):
 【章节上下文】
 {chapter_context}
 
+【场景记忆上下文（如有）】
+{scene_memory_context}
+
 【场景计划】
 {scene_plan}
 
@@ -86,8 +102,9 @@ def generate_scene_text(
     characters: CharactersConfig,
     previous_summary: str = "",
     chapter_context: str = "",
+    scene_memory_context: Optional[SceneMemoryContext] = None,
     verbose: bool = False,
-    llm_config=None
+    llm_config=None,
 ) -> GeneratedScene:
     """
     生成场景文本
@@ -111,6 +128,14 @@ def generate_scene_text(
     word_count_min = int(target_words * 0.8)
     word_count_max = int(target_words * 1.2)
 
+    if scene_memory_context is not None:
+        try:
+            scene_memory_context_payload = scene_memory_context.model_dump_json(indent=2)
+        except Exception:
+            scene_memory_context_payload = "null"
+    else:
+        scene_memory_context_payload = "null"
+
     result = chain.invoke({
         "world_setting": world_setting.model_dump_json(indent=2),
         "characters": characters.model_dump_json(indent=2),
@@ -121,6 +146,7 @@ def generate_scene_text(
         "scene_plan_obj.estimated_words": scene_plan.estimated_words,
         "previous_summary": previous_summary if previous_summary else "这是第一个场景",
         "chapter_context": chapter_context or "[]",
+        "scene_memory_context": scene_memory_context_payload,
         "format_instructions": parser.get_format_instructions(),
         "word_count_min": word_count_min,
         "word_count_max": word_count_max

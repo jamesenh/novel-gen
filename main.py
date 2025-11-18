@@ -82,43 +82,6 @@ def export_novel_cmd(project_name: str):
     orchestrator = NovelOrchestrator(project_name=project_name)
     orchestrator.export_all_chapters()
 
-def main():
-    """主函数"""
-    print("NovelGen - AI小说生成器")
-    print("作者: Jamesenh")
-    print()
-    
-    demo_full_flow()
-
-def test_world_chain():
-    """测试世界观生成链"""
-    orchestrator = NovelOrchestrator(project_name="test_world_chain", verbose=True)
-    world = orchestrator.step1_create_world("一个修真世界，有五大宗门，主角从小宗门崛起")
-
-def test_create_theme_conflict():
-    """测试主题冲突生成链"""
-    orchestrator = NovelOrchestrator(project_name="test_world_chain", verbose=True)
-    theme_conflict = orchestrator.step2_create_theme_conflict("关于个人奋斗与宗门争斗的故事")
-
-def test_create_characters():
-    """测试角色生成链"""
-    orchestrator = NovelOrchestrator(project_name="test_world_chain", verbose=True)
-    characters = orchestrator.step3_create_characters()
-
-def test_create_outline():
-    """测试大纲生成链"""
-    orchestrator = NovelOrchestrator(project_name="test_world_chain", verbose=True)
-    outline = orchestrator.step4_create_outline(num_chapters=10)
-
-def test_create_chapter_plan():
-    """测试章节计划生成链"""
-    orchestrator = NovelOrchestrator(project_name="test_world_chain", verbose=True)
-    chapter_plan = orchestrator.step5_create_chapter_plan(chapter_number=3)
-
-def test_generate_chapter_text():
-    """测试章节文本生成链"""
-    orchestrator = NovelOrchestrator(project_name="test_world_chain", verbose=True)
-    chapter = orchestrator.step6_generate_chapter_text(chapter_number=1)
 
 def export_chapter_cmd(project_name: str, chapter_number: int):
     """

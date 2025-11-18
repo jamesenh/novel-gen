@@ -2,6 +2,8 @@
 """测试 step6 章节文本生成的 force 复用/重算语义"""
 
 import os
+import json
+from datetime import datetime
 
 import novelgen.runtime.orchestrator as orchestrator_module
 from novelgen.runtime.orchestrator import NovelOrchestrator
@@ -16,6 +18,7 @@ from novelgen.models import (
     GeneratedScene,
     ChapterMemoryEntry,
     ConsistencyReport,
+    SceneMemoryContext,
 )
 
 
@@ -24,6 +27,8 @@ CALL_COUNTS = {
     "memory": 0,
     "consistency": 0,
 }
+
+LAST_SCENE_MEMORY_CONTEXT = None
 
 
 def _bootstrap_minimal_project(orchestrator: NovelOrchestrator, chapter_number: int = 1):
@@ -114,10 +119,13 @@ def _install_stubs():
         characters: CharactersConfig,
         previous_summary: str = "",
         chapter_context: str = "",
+        scene_memory_context=None,
         verbose: bool = False,
         llm_config=None,
     ) -> GeneratedScene:
+        global LAST_SCENE_MEMORY_CONTEXT
         CALL_COUNTS["scene"] += 1
+        LAST_SCENE_MEMORY_CONTEXT = scene_memory_context
         return GeneratedScene(
             scene_number=scene_plan.scene_number,
             content=f"fake scene content #{CALL_COUNTS['scene']}",
@@ -240,6 +248,63 @@ def test_generate_all_chapters_force_semantics():
     # 第三次批量生成（force=True）：应为现有章节重新生成文本，场景次数增加
     orchestrator.generate_all_chapters(force=True)
     assert CALL_COUNTS["scene"] > first_scene_calls
+
+
+def test_step6_without_scene_memory_context_passes_none():
+    """当不存在场景记忆文件时，应以 None 作为 scene_memory_context 调用链"""
+    _install_stubs()
+
+    project_name = "test_step6_no_memory"
+    orchestrator = NovelOrchestrator(project_name=project_name, verbose=False)
+    _bootstrap_minimal_project(orchestrator, chapter_number=1)
+
+    global LAST_SCENE_MEMORY_CONTEXT
+    LAST_SCENE_MEMORY_CONTEXT = "sentinel"
+
+    memory_file = os.path.join(
+        orchestrator.project_dir,
+        "scene_1_1_memory.json",
+    )
+    if os.path.exists(memory_file):
+        os.remove(memory_file)
+
+    orchestrator.step6_generate_chapter_text(chapter_number=1, force=True)
+
+    assert LAST_SCENE_MEMORY_CONTEXT is None
+
+
+def test_step6_with_scene_memory_context_loads_and_passes_object():
+    """当存在场景记忆文件时，应加载为 SceneMemoryContext 并传递给链"""
+    _install_stubs()
+
+    project_name = "test_step6_with_memory"
+    orchestrator = NovelOrchestrator(project_name=project_name, verbose=False)
+    _bootstrap_minimal_project(orchestrator, chapter_number=1)
+
+    global LAST_SCENE_MEMORY_CONTEXT
+    LAST_SCENE_MEMORY_CONTEXT = None
+
+    memory_file = os.path.join(
+        orchestrator.project_dir,
+        "scene_1_1_memory.json",
+    )
+    payload = {
+        "project_id": project_name,
+        "chapter_index": 1,
+        "scene_index": 1,
+        "entity_states": [],
+        "relevant_memories": [],
+        "timeline_context": None,
+        "retrieval_timestamp": datetime.now().isoformat(),
+    }
+    with open(memory_file, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    orchestrator.step6_generate_chapter_text(chapter_number=1, force=True)
+
+    assert isinstance(LAST_SCENE_MEMORY_CONTEXT, SceneMemoryContext)
+    assert LAST_SCENE_MEMORY_CONTEXT.chapter_index == 1
+    assert LAST_SCENE_MEMORY_CONTEXT.scene_index == 1
 
 
 if __name__ == "__main__":
