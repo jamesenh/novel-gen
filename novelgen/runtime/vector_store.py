@@ -39,6 +39,13 @@ class LangChainEmbeddingAdapter:
             langchain_embeddings: LangChain Embeddings 实例（如 OpenAIEmbeddings）
         """
         self.langchain_embeddings = langchain_embeddings
+        model_name = getattr(langchain_embeddings, "model", None)
+        # 存储模型名称，供 name() 方法返回
+        self._name = model_name or langchain_embeddings.__class__.__name__
+    
+    def name(self) -> str:
+        """返回 embedding 函数名称，供 Chroma 记录/比对使用"""
+        return self._name
     
     def __call__(self, input: List[str]) -> List[List[float]]:
         """
@@ -70,10 +77,25 @@ class LangChainEmbeddingAdapter:
             嵌入向量列表（ChromaDB 期望 List[List[float]] 格式）
         """
         try:
+            # 添加调试日志
+            logger.debug(f"embed_query 被调用: text={text} (type: {type(text)}), input={input} (type: {type(input)})")
+            
             # 兼容两种参数名
             query_input = text if text is not None else input
             if query_input is None:
                 raise ValueError("必须提供 text 或 input 参数")
+            
+            # 验证输入类型
+            if not isinstance(query_input, (str, list)):
+                logger.error(f"query_input 类型错误: {type(query_input)}, 值: {query_input}")
+                raise ValueError(f"query_input 必须是 str 或 list，但得到 {type(query_input)}")
+            
+            # 如果是列表，验证所有元素都是字符串
+            if isinstance(query_input, list):
+                for i, item in enumerate(query_input):
+                    if not isinstance(item, str):
+                        logger.error(f"query_input[{i}] 类型错误: {type(item)}, 值: {item}")
+                        raise ValueError(f"query_input 列表中的所有元素都必须是字符串，但第{i}个元素是 {type(item)}")
             
             # 处理 list 类型（ChromaDB 查询时会传递 list）
             if isinstance(query_input, list):
@@ -283,6 +305,10 @@ class ChromaVectorStore(VectorStoreInterface):
                     # 这是因为 ModelScope API 的响应格式与 OpenAI 标准格式略有差异
                     kwargs["chunk_size"] = 1
                     
+                    # 禁用 LangChain 的 tokenization 处理，强制传递原始字符串
+                    # 阿里云 DashScope API 期望接收字符串而不是 token ID
+                    kwargs["check_embedding_ctx_length"] = False
+                    
                     langchain_embeddings = OpenAIEmbeddings(**kwargs)
                     self.embedding_function = LangChainEmbeddingAdapter(langchain_embeddings)
                     logger.info(f"使用自定义 embedding 模型: {self.embedding_config.model_name}")
@@ -295,18 +321,40 @@ class ChromaVectorStore(VectorStoreInterface):
             
             # 获取或创建集合
             try:
-                self.collection = self.client.get_collection(
-                    name=self.collection_name,
-                    embedding_function=self.embedding_function
-                )
-                logger.info(f"获取已存在的集合: {self.collection_name}")
-            except Exception:
-                self.collection = self.client.create_collection(
-                    name=self.collection_name,
-                    embedding_function=self.embedding_function,
-                    metadata={"description": "NovelGen故事记忆向量存储"}
-                )
-                logger.info(f"创建新集合: {self.collection_name}")
+                # 优先使用 get_or_create_collection（新版本 Chroma 推荐）
+                if hasattr(self.client, "get_or_create_collection"):
+                    self.collection = self.client.get_or_create_collection(
+                        name=self.collection_name,
+                        embedding_function=self.embedding_function,
+                        metadata={"description": "NovelGen故事记忆向量存储"}
+                    )
+                    logger.info(f"已获取或创建集合: {self.collection_name}")
+                else:
+                    # 兼容旧版本：先尝试获取，不存在再创建
+                    try:
+                        self.collection = self.client.get_collection(
+                            name=self.collection_name,
+                            embedding_function=self.embedding_function
+                        )
+                        logger.info(f"获取已存在的集合: {self.collection_name}")
+                    except Exception as inner_e:
+                        logger.warning(f"获取集合失败，将尝试创建新集合: {inner_e}")
+                        self.collection = self.client.create_collection(
+                            name=self.collection_name,
+                            embedding_function=self.embedding_function,
+                            metadata={"description": "NovelGen故事记忆向量存储"}
+                        )
+                        logger.info(f"创建新集合: {self.collection_name}")
+            
+            except Exception as e:
+                # 典型场景：集合已存在但 embedding_function 或 metadata 不兼容
+                if "already exists" in str(e):
+                    logger.warning(f"集合已存在且配置不兼容，尝试在兼容模式下重用已有集合: {e}")
+                    # 不再传递 embedding_function，避免因配置不一致导致初始化失败
+                    self.collection = self.client.get_collection(name=self.collection_name)
+                    logger.info(f"在兼容模式下重用已存在集合: {self.collection_name}")
+                else:
+                    raise
             
             logger.info(f"Chroma向量存储初始化成功: {self.persist_directory}")
             return True

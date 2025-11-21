@@ -462,6 +462,22 @@ class DatabaseManager:
     def is_enabled(self) -> bool:
         """检查持久化是否启用"""
         return self.enabled and self.db is not None
+
+    @contextmanager
+    def get_connection(self):
+        """获取底层数据库连接的上下文管理器
+        
+        仅用于少量内部维护场景（如批量删除），保持与 SQLiteDatabase.get_connection 相同的语义。
+        """
+        if not self.is_enabled() or self.db is None:
+            raise RuntimeError("持久化未启用，无法获取数据库连接")
+        
+        # 委托给具体实现（当前为 SQLiteDatabase）
+        if hasattr(self.db, "get_connection"):
+            with self.db.get_connection() as conn:  # type: ignore[attr-defined]
+                yield conn
+        else:
+            raise RuntimeError("当前数据库实现不支持直接获取连接")
     
     def save_entity_snapshot(self, snapshot: EntityStateSnapshot) -> bool:
         """保存实体状态快照（带降级处理）"""
