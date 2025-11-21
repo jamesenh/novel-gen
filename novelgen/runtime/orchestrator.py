@@ -223,7 +223,7 @@ class NovelOrchestrator:
         
         unmet = []
         for dep in chapter_summary.dependencies:
-            if dep.chapter_number is None:
+            if dep.chapter_number is None or dep.chapter_number <= 0:
                 continue
             if dep.chapter_number not in existing:
                 unmet.append(f"章节{dep.chapter_number} - {dep.description}")
@@ -523,7 +523,6 @@ class NovelOrchestrator:
                         (self.project_name, chapter_index)
                     )
                     deleted_count = cursor.rowcount
-                    conn.commit()
                     print(f"已从数据库删除第{chapter_index}章的{deleted_count}个记忆块记录")
             except Exception as e:
                 print(f"⚠️ 删除章节数据库记忆记录失败: {e}")

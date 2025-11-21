@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import re
 from typing import Generic, TypeVar
 
 from langchain_core.exceptions import OutputParserException
@@ -80,6 +81,40 @@ class LLMJsonRepairOutputParser(BaseOutputParser[T], Generic[T]):
         # 追加 StrOutputParser 以确保拿到纯字符串结果
         self._fix_chain = self._fix_prompt | llm | StrOutputParser()
 
+    @staticmethod
+    def _cleanup_json_output(text: str) -> str:
+        """
+        清洗 LLM 输出，移除 Markdown 包裹和额外文本。
+        
+        Args:
+            text: 原始 LLM 输出文本
+            
+        Returns:
+            清洗后的 JSON 文本
+        """
+        if not text or not text.strip():
+            return text
+        
+        # 1. 移除 Markdown 代码块包裹（```json ... ``` 或 ``` ... ```）
+        # 匹配 ```json 或 ``` 开头，以 ``` 结尾的代码块
+        markdown_pattern = r'^\s*```(?:json)?\s*\n?(.+?)\n?```\s*$'
+        match = re.search(markdown_pattern, text, re.DOTALL)
+        if match:
+            text = match.group(1)
+        
+        # 2. 移除首尾空白
+        text = text.strip()
+        
+        # 3. 截取最外层 JSON 对象（从第一个 { 到最后一个 }）
+        # 这能处理"好的，下面是 JSON：{...}"这种情况
+        first_brace = text.find('{')
+        last_brace = text.rfind('}')
+        
+        if first_brace != -1 and last_brace != -1 and first_brace < last_brace:
+            text = text[first_brace:last_brace + 1]
+        
+        return text
+    
     def _repair_text(self, text: str, error_message: str) -> str:
         """调用LLM修复JSON字符串。"""
         return self._fix_chain.invoke(
@@ -92,6 +127,22 @@ class LLMJsonRepairOutputParser(BaseOutputParser[T], Generic[T]):
 
     def parse_result(self, result: list[Generation], *, partial: bool = False) -> T:
         """优先尝试基础解析器，失败则触发修复逻辑。"""
+        # 先对原始输出进行清洗
+        original_text = result[0].text
+        cleaned_text = self._cleanup_json_output(original_text)
+        
+        # 如果清洗后文本有变化，先用清洗后的文本尝试解析
+        if cleaned_text != original_text:
+            try:
+                return self._base_parser.parse_result(
+                    [Generation(text=cleaned_text)],
+                    partial=partial
+                )
+            except Exception:
+                # 清洗后仍然失败，继续使用修复逻辑
+                pass
+        
+        # 尝试原始解析
         try:
             return self._base_parser.parse_result(result, partial=partial)
         except Exception as error:  # 捕获所有解析异常
@@ -99,11 +150,13 @@ class LLMJsonRepairOutputParser(BaseOutputParser[T], Generic[T]):
                 error.llm_output  # type: ignore[attr-defined]
                 if isinstance(error, OutputParserException)
                 and getattr(error, "llm_output", None)
-                else result[0].text
+                else cleaned_text  # 使用清洗后的文本
             )
             final_error = error
             for _ in range(self._max_retries):
                 fixed_text = self._repair_text(last_text, str(final_error))
+                # 对修复后的文本也进行清洗
+                fixed_text = self._cleanup_json_output(fixed_text)
                 try:
                     return self._base_parser.parse_result(
                         [Generation(text=fixed_text)],

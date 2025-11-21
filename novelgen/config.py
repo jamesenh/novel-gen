@@ -60,6 +60,7 @@ class LLMConfig(BaseModel):
     max_tokens: Optional[int] = Field(default=None, description="最大token数")
     api_key: Optional[str] = Field(default=None, description="API密钥")
     base_url: Optional[str] = Field(default=None, description="API基础URL")
+    use_structured_output: bool = Field(default=True, description="是否使用结构化输出模式（with_structured_output）")
 
     def __init__(self, **data):
         super().__init__(**data)
