@@ -46,3 +46,4 @@ projects/*/
 
 # Logs
 *.log
+.env.魔搭
