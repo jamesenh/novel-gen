@@ -67,50 +67,70 @@ python -m novelgen.runtime.export \
 6. **Text Generation** (`chains/scene_text_chain.py`) → Writes novel content
 
 ### Key Design Principles (from .cursor/rules/base.mdc)
-- **Modular Design**: Each step is an independent LangChain
+- **Graph-Based Workflow**: The novel generation pipeline is implemented as a LangGraph workflow, where each step is a node in the graph
+- **Modular Design**: Each step is an independent LangChain component (node)
 - **Structured Output**: All outputs use Pydantic models (defined in `models.py`)
-- **JSON Communication**: Chains communicate via JSON files only
+- **State Management**: LangGraph handles state persistence and flow between nodes
+- **JSON Communication**: Chains still communicate via JSON files for external persistence
 - **LangChain Separation**: Business logic separated from LangChain code
 - **Prompt Structure**: Must include task, input, output format (JSON schema), and notes
 
 ### Project Structure
 ```
 novelgen/
-├── chains/           # LangChain processing chains (6 steps)
-├── runtime/          # Orchestration and utilities
-├── models.py         # All Pydantic data models
+├── chains/           # LangChain processing chains (6 steps, nodes in the graph)
+├── runtime/          # Orchestration with LangGraph and utilities
+│   ├── orchestrator.py         # Current orchestrator (to be replaced/updated)
+│   └── workflow.py             # New LangGraph workflow definition
+├── models.py         # All Pydantic data models (including LangGraph state)
 ├── config.py         # Configuration management
 └── llm.py           # LLM initialization
 ```
 
-### Data Flow
-1. `settings.json` → World creation
-2. Each chain reads previous JSON outputs
-3. All outputs stored in `projects/{project_name}/`
-4. Final export combines all chapters into single text file
+### Data Flow (LangGraph)
+1. `settings.json` is loaded as the initial input to the workflow
+2. LangGraph manages the state throughout the 6-step pipeline
+3. Each node (chain) processes the current state and returns an updated state
+4. All outputs are still stored in `projects/{project_name}/` at appropriate stages
+5. Final export combines all chapters into single text file
 
 ## Critical Implementation Rules
 
-1. **Always use Pydantic models** for structured outputs
-2. **Chain independence**: Each chain must be runnable standalone
-3. **JSON-only communication** between chains
-4. **Chinese language focus**: All prompts and outputs in Chinese
-5. **LangChain 1.0+ syntax**: Use modern LangChain patterns
-6. **Prompt template structure**: Must include JSON schema constraints
+1. **Always use Pydantic models** for structured outputs and LangGraph state definition
+2. **Graph-based orchestration**: Use LangGraph to orchestrate the workflow, not manual sequencing
+3. **Node independence**: Each chain must be a self-contained node that can be run standalone
+4. **State management**: LangGraph handles the state flow between nodes; avoid manual state passing
+5. **JSON-only communication**: External persistence uses JSON files only
+6. **Chinese language focus**: All prompts and outputs in Chinese
+7. **LangChain 1.0+ syntax**: Use modern LangChain patterns
+8. **LangGraph 1.0+ syntax**: Use modern LangGraph patterns (StateGraph, nodes, edges)
+9. **Prompt template structure**: Must include task, input, output format (JSON schema), and notes
 
 ## Common Development Tasks
 
-### Adding a New Chain
-1. Create new chain file in `novelgen/chains/`
+### Adding a New Chain (Node)
+1. Create new chain file in `novelgen/chains/` following existing patterns
 2. Define input/output Pydantic models in `models.py`
 3. Follow existing chain patterns (ChatPromptTemplate → LLM → OutputParser)
-4. Add to orchestrator in `runtime/orchestrator.py`
+4. Add to LangGraph workflow in `runtime/workflow.py`:
+   - Define the node function that wraps the chain
+   - Add the node to the StateGraph
+   - Define edges from the new node
+5. Ensure the LangGraph state model is updated if new state fields are needed
 
 ### Modifying Existing Chains
 1. Check current JSON schema in corresponding Pydantic model
 2. Update prompt template to include new requirements
 3. Test chain independently before integration
-4. Ensure backward compatibility with existing projects
+4. Update the LangGraph workflow if the node interface changes
+5. Ensure backward compatibility with existing projects
+
+### Adding a New Workflow Branch
+1. Identify the branching point in the existing workflow
+2. Define the new node(s) that will form the branch
+3. Add branch conditions in the StateGraph
+4. Update the state model if new state fields are needed for the branch
+5. Test the complete workflow with both paths
 
 ### Debugging Generation Issues
 1. Check individual chain outputs in `projects/{name}/` JSON files

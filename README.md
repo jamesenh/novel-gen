@@ -11,15 +11,19 @@ NovelGen 是一个 从零开始构建 AI 自动写小说的项目，目标不仅
 
 🧱 严格结构化的输出（Pydantic + JSON）
 
-⚙️ 全流程基于 LangChain 构建，可拓展性强
+⚙️ 全流程基于 **LangChain + LangGraph** 构建，可拓展性强，支持复杂工作流
 
 🔁 支持章节摘要、全书摘要、场景级生成
 
 🔍 内置“文本自检”，避免设定冲突
 
-🧩 模块化设计，可按需替换链路
+🧩 模块化设计，可按需替换链路，每个步骤作为LangGraph节点独立运行
 
-🔧 非常适合学习 LangChain：Runnable、PromptTemplate、Structured Output、VectorStore（可选）
+🔧 非常适合学习：
+   - LangChain 1.0+：Runnable、PromptTemplate、Structured Output、VectorStore
+   - LangGraph 1.0+：Stateful workflows、graph-based orchestration、state management
+
+🔬 支持 checkpointing 和状态持久化，可中途暂停/恢复生成
 
 ## 🧩 项目目录结构
 ```
@@ -29,16 +33,17 @@ novelgen/
     models.py             # 所有数据结构(Pydantic)
     llm.py                # LangChain LLM 初始化
     chains/
-      world_chain.py
-      theme_conflict_chain.py
-      characters_chain.py
-      outline_chain.py
-      chapters_plan_chain.py
-      scene_text_chain.py
-    runtime/
-      orchestrator.py     # 主流程调度
-      summary.py          # 章节/全书摘要
-      revision.py         # 修订机制
+        world_chain.py
+        theme_conflict_chain.py
+        characters_chain.py
+        outline_chain.py
+        chapters_plan_chain.py
+        scene_text_chain.py
+      runtime/
+        orchestrator.py     # 当前主流程调度（将逐步迁移到LangGraph）
+        workflow.py         # LangGraph工作流定义（新的主流程调度）
+        summary.py          # 章节/全书摘要
+        revision.py         # 修订机制
   projects/
     demo_001/
       settings.json
