@@ -3,6 +3,7 @@
 所有业务相关的数据结构都定义在此文件中
 """
 from typing import List, Optional, Dict, Any
+from datetime import datetime
 from pydantic import BaseModel, Field
 
 
@@ -12,6 +13,8 @@ class Settings(BaseModel):
     author: str = Field(default="Jamesenh", description="作者")
     llm_model: str = Field(default="gpt-4", description="使用的LLM模型")
     temperature: float = Field(default=0.7, description="生成温度")
+    persistence_enabled: bool = Field(default=True, description="是否启用数据持久化")
+    vector_store_enabled: bool = Field(default=True, description="是否启用向量存储")
 
 
 class WorldSetting(BaseModel):
@@ -161,3 +164,48 @@ class RevisionStatus(BaseModel):
     revised_chapter: Optional[GeneratedChapter] = Field(default=None, description="修订候选的完整章节结构")
     created_at: str = Field(description="创建时间")
     decision_at: Optional[str] = Field(default=None, description="确认时间")
+
+
+# 持久化相关数据模型
+
+class EntityStateSnapshot(BaseModel):
+    """实体在特定时间点的状态快照"""
+    project_id: str = Field(description="项目ID")
+    entity_type: str = Field(description="实体类型：character, location, item")
+    entity_id: str = Field(description="实体ID")
+    chapter_index: Optional[int] = Field(default=None, description="章节索引")
+    scene_index: Optional[int] = Field(default=None, description="场景索引")
+    timestamp: datetime = Field(description="时间戳")
+    state_data: Dict[str, Any] = Field(description="JSON格式的状态数据")
+    version: int = Field(default=1, description="版本号")
+
+
+class StoryMemoryChunk(BaseModel):
+    """文本记忆块"""
+    chunk_id: str = Field(description="记忆块ID")
+    project_id: str = Field(description="项目ID")
+    chapter_index: Optional[int] = Field(default=None, description="章节索引")
+    scene_index: Optional[int] = Field(default=None, description="场景索引")
+    content: str = Field(description="原始文本内容")
+    content_type: str = Field(description="内容类型：scene, dialogue, description")
+    entities_mentioned: List[str] = Field(default_factory=list, description="提及的实体ID")
+    tags: List[str] = Field(default_factory=list, description="内容标签")
+    embedding_id: Optional[str] = Field(default=None, description="向量存储中的ID")
+    created_at: datetime = Field(description="创建时间")
+
+
+class SceneMemoryContext(BaseModel):
+    """场景记忆上下文，用于传递给生成链"""
+    project_id: str = Field(description="项目ID")
+    chapter_index: Optional[int] = Field(default=None, description="章节索引")
+    scene_index: Optional[int] = Field(default=None, description="场景索引")
+    entity_states: List[EntityStateSnapshot] = Field(default_factory=list, description="实体状态列表")
+    relevant_memories: List[StoryMemoryChunk] = Field(default_factory=list, description="相关记忆列表")
+    timeline_context: Optional[Dict[str, Any]] = Field(default=None, description="时间线上下文")
+    retrieval_timestamp: datetime = Field(description="检索时间戳")
+
+
+class MemoryRetrievalAnalysis(BaseModel):
+    """记忆检索分析结果，用于指导向量检索"""
+    search_queries: List[str] = Field(default_factory=list, description="用于向量检索的查询关键词列表")
+    key_entities: List[str] = Field(default_factory=list, description="需要重点关注的实体名称列表")

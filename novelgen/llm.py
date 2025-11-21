@@ -4,12 +4,15 @@ LLM实例管理
 """
 import time
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Type, TypeVar
+from pydantic import BaseModel
 from langchain_openai import ChatOpenAI
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
 from langchain_core.messages import BaseMessage
 from novelgen.config import LLMConfig
+
+T = TypeVar("T", bound=BaseModel)
 
 
 class VerboseCallbackHandler(BaseCallbackHandler):
@@ -111,8 +114,17 @@ def get_llm(config: LLMConfig = None, verbose: bool = False):
         callbacks.append(VerboseCallbackHandler())
     
     extra_body = None
-    if config.base_url and "api-inference.modelscope.cn" in config.base_url and "Qwen3-32B" in config.model_name:
-        extra_body = {"enable_thinking": False}
+    # 为阿里云ModelScope的所有Qwen模型设置enable_thinking=False
+    if config.base_url and "api-inference.modelscope.cn" in config.base_url:
+        import re
+        # 匹配所有Qwen系列模型
+        qwen_patterns = [
+            r"qwen.*",  # 通用qwen模型
+            r"Qwen.*",  # 大写开头的Qwen模型
+            r"Qwen3-\d+B",  # 原有的Qwen3模型
+        ]
+        if any(re.search(pattern, config.model_name or "", re.IGNORECASE) for pattern in qwen_patterns):
+            extra_body = {"enable_thinking": False}
     
     return ChatOpenAI(
         model=config.model_name,
@@ -123,4 +135,39 @@ def get_llm(config: LLMConfig = None, verbose: bool = False):
         callbacks=callbacks if callbacks else None,
         extra_body=extra_body
     )
+
+
+def get_structured_llm(pydantic_model: Type[T], config: LLMConfig = None, verbose: bool = False):
+    """
+    获取支持结构化输出的LLM实例
+    
+    Args:
+        pydantic_model: Pydantic模型类，用于定义输出结构
+        config: LLM配置，如果为None则使用默认配置
+        verbose: 是否启用详细日志输出
+        
+    Returns:
+        配置了 with_structured_output 的 ChatOpenAI 实例
+        
+    Note:
+        - 如果 config.use_structured_output 为 False，则返回普通 LLM 实例（不使用 structured_output）
+        - 如果后端不支持 structured_output（如部分兼容端点），应在调用侧捕获异常并退回到传统解析路径
+    """
+    if config is None:
+        config = LLMConfig()
+    
+    # 如果配置明确禁用 structured_output，返回普通 LLM
+    if not config.use_structured_output:
+        return get_llm(config=config, verbose=verbose)
+    
+    # 创建基础 LLM 实例
+    base_llm = get_llm(config=config, verbose=verbose)
+    
+    # 使用 with_structured_output 包装
+    try:
+        return base_llm.with_structured_output(pydantic_model)
+    except Exception as e:
+        # 如果 with_structured_output 不被支持，打印警告并返回普通 LLM
+        print(f"⚠️  警告: 当前后端不支持 structured_output，将使用传统解析路径。错误: {e}")
+        return base_llm
 

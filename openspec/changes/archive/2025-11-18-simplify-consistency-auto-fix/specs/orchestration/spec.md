@@ -1,4 +1,4 @@
-## MODIFIED Requirements
+## ADDED Requirements
 
 ### Requirement: Consistency Detection and Revision Trigger
 编排器在章节生成后 MUST 执行一致性检测，并根据检测结果中是否有修复建议（`fix_instructions`）触发修订流程。
