@@ -15,6 +15,11 @@ class Settings(BaseModel):
     temperature: float = Field(default=0.7, description="生成温度")
     persistence_enabled: bool = Field(default=True, description="是否启用数据持久化")
     vector_store_enabled: bool = Field(default=True, description="是否启用向量存储")
+    
+    # 用户输入字段（用于工作流）
+    world_description: str = Field(description="世界观描述")
+    theme_description: Optional[str] = Field(default="", description="主题描述（可选）")
+    num_chapters: int = Field(default=10, description="章节数量")
 
 
 class WorldSetting(BaseModel):
@@ -209,3 +214,73 @@ class MemoryRetrievalAnalysis(BaseModel):
     """记忆检索分析结果，用于指导向量检索"""
     search_queries: List[str] = Field(default_factory=list, description="用于向量检索的查询关键词列表")
     key_entities: List[str] = Field(default_factory=list, description="需要重点关注的实体名称列表")
+
+
+# Mem0 配置与数据模型
+
+class Mem0Config(BaseModel):
+    """Mem0 配置"""
+    enabled: bool = Field(default=False, description="是否启用 Mem0")
+    vector_store_provider: str = Field(default="chroma", description="向量存储提供商（当前仅支持 chroma）")
+    chroma_path: str = Field(default="data/chroma", description="ChromaDB 存储路径（复用现有路径）")
+    collection_name: str = Field(default="mem0_memories", description="Mem0 专用的 Collection 名称")
+    embedding_model_dims: int = Field(default=1536, description="Embedding 维度（与项目配置一致）")
+    api_key: Optional[str] = Field(default=None, description="Mem0 API Key（仅云端模式需要）")
+    timeout: int = Field(default=5, description="查询超时时间（秒）")
+
+
+class UserPreference(BaseModel):
+    """用户偏好记录（预留框架，当前不从修订过程中提取）"""
+    project_id: str = Field(description="项目ID")
+    preference_type: str = Field(description="偏好类型：writing_style, tone, character_development, plot_preference")
+    content: str = Field(description="偏好内容描述")
+    source: str = Field(description="偏好来源：manual（主动设置）, feedback（用户反馈）, explicit（明确指定）")
+    timestamp: datetime = Field(default_factory=datetime.now, description="记录时间")
+
+
+# LangGraph 工作流状态模型
+
+class NovelGenerationState(BaseModel):
+    """
+    LangGraph 工作流状态模型
+    统一管理整个小说生成流程的状态
+    
+    开发者: jamesenh, 开发时间: 2025-11-21
+    """
+    # 项目元信息
+    project_name: str = Field(description="项目名称")
+    project_dir: str = Field(description="项目目录路径")
+    
+    # 配置
+    settings: Optional[Settings] = Field(default=None, description="项目配置")
+    
+    # 6步生成结果
+    world: Optional[WorldSetting] = Field(default=None, description="世界观设定")
+    theme_conflict: Optional[ThemeConflict] = Field(default=None, description="主题与冲突")
+    characters: Optional[CharactersConfig] = Field(default=None, description="角色配置")
+    outline: Optional[Outline] = Field(default=None, description="小说大纲")
+    chapters_plan: Dict[int, ChapterPlan] = Field(default_factory=dict, description="章节计划（章节编号 -> 计划）")
+    chapters: Dict[int, GeneratedChapter] = Field(default_factory=dict, description="生成的章节（章节编号 -> 章节）")
+    
+    # 记忆与上下文
+    chapter_memories: List[ChapterMemoryEntry] = Field(default_factory=list, description="章节记忆列表")
+    entity_states: Dict[str, EntityStateSnapshot] = Field(default_factory=dict, description="实体状态快照（实体ID -> 状态）")
+    recent_context: List[str] = Field(default_factory=list, description="最近N章的摘要，用于传递上下文")
+    
+    # 一致性与修订
+    consistency_reports: Dict[int, ConsistencyReport] = Field(default_factory=dict, description="一致性报告（章节编号 -> 报告）")
+    
+    # 工作流控制
+    current_step: str = Field(default="init", description="当前步骤标识")
+    current_chapter_number: Optional[int] = Field(default=None, description="当前正在生成的章节编号")
+    completed_steps: List[str] = Field(default_factory=list, description="已完成步骤列表")
+    failed_steps: List[str] = Field(default_factory=list, description="失败步骤列表")
+    error_messages: Dict[str, str] = Field(default_factory=dict, description="错误消息（步骤 -> 错误信息）")
+    
+    # 可选：持久化管理器引用（不序列化，通过 model_config 排除）
+    # 注：这些字段在实际使用时通过 workflow context 传递，不需要序列化到 JSON
+    db_manager: Optional[Any] = Field(default=None, description="数据库管理器引用", exclude=True)
+    vector_manager: Optional[Any] = Field(default=None, description="向量存储管理器引用", exclude=True)
+    
+    class Config:
+        arbitrary_types_allowed = True  # 允许任意类型（用于 db_manager, vector_manager）

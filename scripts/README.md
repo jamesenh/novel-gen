@@ -4,7 +4,55 @@
 
 ## 工具列表
 
-### 1. query_entity.py - 实体状态查询工具
+### Mem0 管理工具
+
+#### 1. check_mem0_health.py - Mem0 健康检查
+
+检查 Mem0 连接状态和数据统计。
+
+**使用示例**:
+
+```bash
+# 检查默认项目
+uv run python scripts/check_mem0_health.py
+
+# 检查指定项目
+uv run python scripts/check_mem0_health.py --project demo_001
+```
+
+#### 2. export_mem0_to_json.py - Mem0 数据导出
+
+导出 Mem0 记忆数据到 JSON 文件（用于备份）。
+
+**使用示例**:
+
+```bash
+# 导出到默认文件名
+uv run python scripts/export_mem0_to_json.py --project demo_001
+
+# 导出到指定文件
+uv run python scripts/export_mem0_to_json.py --project demo_001 --output backup.json
+```
+
+#### 3. clear_mem0_memory.py - Mem0 记忆清理
+
+清空指定项目的 Mem0 记忆数据（用于测试）。
+
+**警告**: 此操作不可逆！建议先导出备份。
+
+**使用示例**:
+
+```bash
+# 交互式清理（需要确认）
+uv run python scripts/clear_mem0_memory.py --project demo_001
+
+# 直接清理（跳过确认）
+uv run python scripts/clear_mem0_memory.py --project demo_001 --confirm
+```
+
+### 数据查询工具
+
+#### 4. query_entity.py - 实体状态查询工具
 
 查询指定项目中某个实体的状态信息。
 
@@ -45,7 +93,7 @@ python scripts/query_entity.py my_project char_001 --latest --db /path/to/db.sql
 - `--db PATH`: 数据库路径（默认从配置读取）
 - `-v, --verbose`: 显示详细状态数据
 
-### 2. query_scene_memory.py - 场景记忆查询工具
+#### 5. query_scene_memory.py - 场景记忆查询工具
 
 查询指定场景或实体相关的记忆块。
 

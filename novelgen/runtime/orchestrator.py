@@ -28,7 +28,10 @@ from novelgen.runtime.consistency import run_consistency_check
 from novelgen.chains.chapter_revision_chain import revise_chapter
 from novelgen.runtime.db import DatabaseManager
 from novelgen.runtime.vector_store import VectorStoreManager
+from novelgen.runtime.workflow import create_novel_generation_workflow
+from novelgen.models import NovelGenerationState
 from datetime import datetime
+from typing import Dict as TypingDict
 
 
 class NovelOrchestrator:
@@ -57,6 +60,7 @@ class NovelOrchestrator:
         # 初始化持久化管理器
         self.db_manager: Optional[DatabaseManager] = None
         self.vector_manager: Optional[VectorStoreManager] = None
+        self.mem0_manager: Optional[Any] = None  # Mem0 管理器
 
         # 从配置中读取持久化设置（默认启用）
         persistence_enabled = getattr(self.config, "persistence_enabled", True)
@@ -96,6 +100,29 @@ class NovelOrchestrator:
                 self.vector_manager = VectorStoreManager(":memory:", enabled=False)
         else:
             print("ℹ️ 已通过配置关闭向量存储（ProjectConfig.vector_store_enabled=False）")
+        
+        # 初始化 Mem0 管理器（如果配置启用）
+        if hasattr(self.config, 'mem0_config') and self.config.mem0_config and self.config.mem0_config.enabled:
+            try:
+                from novelgen.runtime.mem0_manager import Mem0Manager
+                self.mem0_manager = Mem0Manager(
+                    config=self.config.mem0_config,
+                    project_id=project_name,
+                    embedding_config=self.config.embedding_config  # 传入 embedding 配置
+                )
+                health = self.mem0_manager.health_check()
+                if health["status"] == "healthy":
+                    print(f"✅ Mem0 记忆层已启用: {health['message']}")
+                else:
+                    print(f"⚠️ Mem0 初始化失败: {health['message']}")
+            except Exception as e:
+                print(f"⚠️ Mem0 初始化异常: {e}")
+                self.mem0_manager = None
+        
+        # 初始化 LangGraph 工作流
+        self.workflow = create_novel_generation_workflow()
+        self._workflow_state: Optional[NovelGenerationState] = None
+        print("✅ LangGraph 工作流已初始化")
 
     def save_json(self, data, filepath: str):
         """保存JSON文件"""
@@ -284,6 +311,28 @@ class NovelOrchestrator:
             f"- {issue.issue_type}: {issue.fix_instructions}"
             for issue in actionable
         )
+        
+        # [已禁用] 记录用户偏好到 Mem0
+        # 原因：当前的修订过程是基于单个场景或章节进行的与计划的一致性校验，
+        # 生成的是针对具体章节或场景的修订建议，不应作为作者的长期写作偏好记录。
+        # 用户偏好功能已保留为预留框架，未来可通过主动设置、UI 交互等方式添加。
+        # if self.mem0_manager:
+        #     for issue in actionable:
+        #         # 根据问题类型判断偏好类型
+        #         preference_type = "writing_style"
+        #         if "角色" in issue.issue_type or "character" in issue.issue_type.lower():
+        #             preference_type = "character_development"
+        #         elif "情节" in issue.issue_type or "plot" in issue.issue_type.lower():
+        #             preference_type = "plot_preference"
+        #         elif "基调" in issue.issue_type or "tone" in issue.issue_type.lower():
+        #             preference_type = "tone"
+                
+        #         # 添加用户偏好
+        #         self.mem0_manager.add_user_preference(
+        #             preference_type=preference_type,
+        #             content=f"{issue.issue_type}: {issue.fix_instructions}",
+        #             source="revision"
+        #         )
 
         policy = self.config.revision_policy
         
@@ -527,6 +576,129 @@ class NovelOrchestrator:
             except Exception as e:
                 print(f"⚠️ 删除章节数据库记忆记录失败: {e}")
     
+    def _get_or_create_workflow_state(self) -> NovelGenerationState:
+        """获取或创建工作流状态"""
+        if self._workflow_state is None:
+            # 从 JSON 文件加载现有数据
+            from novelgen.models import Settings
+            
+            # 从 settings.json 文件加载配置
+            settings_file = os.path.join(self.project_dir, "settings.json")
+            settings = self.load_json(settings_file, Settings)
+            if settings is None:
+                raise ValueError(f"settings.json 不存在或加载失败: {settings_file}")
+            
+            world = self.load_json(self.config.world_file, WorldSetting)
+            theme_conflict = self.load_json(self.config.theme_conflict_file, ThemeConflict)
+            characters = self.load_json(self.config.characters_file, CharactersConfig)
+            outline = self.load_json(self.config.outline_file, Outline)
+            
+            # 加载章节计划和生成的章节
+            chapters_plan = {}
+            chapters = {}
+            if outline:
+                for ch_summary in outline.chapters:
+                    num = ch_summary.chapter_number
+                    plan_file = os.path.join(self.config.chapters_dir, f"chapter_{num:03d}_plan.json")
+                    if os.path.exists(plan_file):
+                        chapters_plan[num] = self.load_json(plan_file, ChapterPlan)
+                    
+                    chapter_file = os.path.join(self.config.chapters_dir, f"chapter_{num:03d}.json")
+                    if os.path.exists(chapter_file):
+                        chapters[num] = self.load_json(chapter_file, GeneratedChapter)
+            
+            # 加载章节记忆
+            chapter_memories = self._load_chapter_memory_entries()
+            
+            self._workflow_state = NovelGenerationState(
+                project_name=self.project_name,
+                project_dir=self.project_dir,
+                settings=settings,
+                world=world,
+                theme_conflict=theme_conflict,
+                characters=characters,
+                outline=outline,
+                chapters_plan=chapters_plan,
+                chapters=chapters,
+                chapter_memories=chapter_memories,
+                db_manager=self.db_manager,
+                vector_manager=self.vector_manager
+            )
+        
+        return self._workflow_state
+    
+    def run_workflow(self, stop_at: Optional[str] = None) -> NovelGenerationState:
+        """"运行完整工作流
+        
+        Args:
+            stop_at: 可选的停止节点名称（如 "world_creation", "outline_creation" 等）
+        
+        Returns:
+            最终的工作流状态
+        """
+        print("🚀 开始运行 LangGraph 工作流...")
+        
+        # 获取初始状态
+        initial_state = self._get_or_create_workflow_state()
+        
+        # 配置工作流执行
+        config = {"configurable": {"thread_id": self.project_name}}
+        
+        # 运行工作流
+        final_state = None
+        for state in self.workflow.stream(initial_state, config):
+            # state 是一个字典，包含节点名称和对应的状态更新
+            for node_name, node_output in state.items():
+                print(f"  ✓ 节点 '{node_name}' 执行完成")
+                final_state = node_output
+                
+                # 如果指定了停止节点，检查是否到达
+                if stop_at and node_name == stop_at:
+                    print(f"⏸️  已到达停止节点 '{stop_at}'，工作流暂停")
+                    self._workflow_state = final_state
+                    return final_state
+        
+        print("✅ LangGraph 工作流执行完成")
+        self._workflow_state = final_state
+        return final_state
+    
+    def resume_workflow(self, checkpoint_id: Optional[str] = None) -> NovelGenerationState:
+        """从检查点恢复工作流
+        
+        Args:
+            checkpoint_id: 检查点 ID（可选，默认使用最新检查点）
+        
+        Returns:
+            恢复后的工作流状态
+        """
+        print(f"🔄 从检查点恢复工作流...")
+        
+        # 配置工作流执行
+        config = {"configurable": {"thread_id": self.project_name}}
+        
+        # 获取检查点历史
+        checkpoints = list(self.workflow.get_state_history(config))
+        if not checkpoints:
+            print("⚠️ 未找到检查点，将从头开始运行")
+            return self.run_workflow()
+        
+        print(f"📋 找到 {len(checkpoints)} 个检查点")
+        
+        # 使用最新的检查点恢复
+        latest_checkpoint = checkpoints[0]
+        print(f"  恢复检查点: {latest_checkpoint.config['configurable']['thread_id']}")
+        
+        # 从检查点继续执行
+        final_state = None
+        for state in self.workflow.stream(None, config):
+            for node_name, node_output in state.items():
+                print(f"  ✓ 节点 '{node_name}' 执行完成")
+                final_state = node_output
+        
+        print("✅ 工作流恢复执行完成")
+        self._workflow_state = final_state
+        return final_state
+    
     def close(self):
         """关闭持久化连接"""
         if self.db_manager:
@@ -668,6 +840,37 @@ class NovelOrchestrator:
         # 保存配角
         for character in characters.supporting_characters:
             self._save_entity_snapshot("character", character.name, character.model_dump())
+        
+        # 初始化 Mem0 Agent Memory（为每个角色创建初始状态）
+        if self.mem0_manager:
+            try:
+                print(f"💾 正在为角色初始化 Mem0 Agent Memory...")
+                # 主角
+                self.mem0_manager.add_entity_state(
+                    entity_id=characters.protagonist.name,
+                    entity_type="character",
+                    state_description=f"角色初始状态：{characters.protagonist.personality}。背景：{characters.protagonist.background}",
+                    chapter_index=0,
+                )
+                # 反派
+                if characters.antagonist:
+                    self.mem0_manager.add_entity_state(
+                        entity_id=characters.antagonist.name,
+                        entity_type="character",
+                        state_description=f"角色初始状态：{characters.antagonist.personality}。背景：{characters.antagonist.background}",
+                        chapter_index=0,
+                    )
+                # 配角
+                for character in characters.supporting_characters:
+                    self.mem0_manager.add_entity_state(
+                        entity_id=character.name,
+                        entity_type="character",
+                        state_description=f"角色初始状态：{character.personality}。背景：{character.background}",
+                        chapter_index=0,
+                    )
+                print(f"✅ 已为 {1 + (1 if characters.antagonist else 0) + len(characters.supporting_characters)} 个角色初始化 Mem0 记忆")
+            except Exception as e:
+                print(f"⚠️ Mem0 角色初始化失败: {e}")
         
         return characters
 
@@ -907,16 +1110,77 @@ class NovelOrchestrator:
                         output_dir=self.project_dir
                     )
                     print(f"    🧠 已为场景{scene_plan.scene_number}生成记忆上下文")
+                    
+                    # 尝试从 Mem0 补充角色状态（优先级高于 SQLite）
+                    if self.mem0_manager and scene_plan.characters:
+                        try:
+                            print(f"    🔍 正在从 Mem0 检索角色状态...")
+                            mem0_entity_states = []
+                            for character_name in scene_plan.characters:
+                                entity_states = self.mem0_manager.get_entity_state(
+                                    entity_id=character_name,
+                                    query=f"{character_name} 的最新状态",
+                                    limit=1
+                                )
+                                if entity_states:
+                                    # 将 Mem0 结果转换为 EntityStateSnapshot
+                                    latest_state = entity_states[0]
+                                    snapshot = EntityStateSnapshot(
+                                        project_id=self.project_name,
+                                        entity_type="character",
+                                        entity_id=character_name,
+                                        chapter_index=chapter_number,
+                                        scene_index=scene_plan.scene_number,
+                                        timestamp=datetime.now(),
+                                        state_data={
+                                            "source": "mem0",
+                                            "memory": latest_state.get('memory', ''),
+                                            "metadata": latest_state.get('metadata', {}),
+                                        },
+                                        version=1
+                                    )
+                                    mem0_entity_states.append(snapshot)
+                            
+                            # 如果从 Mem0 获取到了状态，替换原有的 SQLite 状态
+                            if mem0_entity_states:
+                                scene_memory_context.entity_states = mem0_entity_states
+                                print(f"    ✅ 已从 Mem0 检索到 {len(mem0_entity_states)} 个角色状态")
+                        except Exception as mem0_exc:
+                            print(f"    ⚠️ Mem0 角色状态检索失败，使用 SQLite 降级: {mem0_exc}")
+                    
                 except Exception as exc:
                     print(f"⚠️ 场景记忆上下文生成失败，将忽略：{exc}")
                     scene_memory_context = None
 
+            # 检索用户偏好（从 Mem0）并注入到 chapter_context
+            user_preferences_text = ""
+            if self.mem0_manager:
+                try:
+                    preferences = self.mem0_manager.search_user_preferences(
+                        query="写作风格和偏好",
+                        limit=5
+                    )
+                    if preferences:
+                        user_preferences_text = "\n\n【用户写作偏好】\n"
+                        user_preferences_text += "以下是用户设定的写作偏好，请在生成时参考：\n"
+                        for pref in preferences:
+                            memory_content = pref.get('memory', '')
+                            if memory_content:
+                                user_preferences_text += f"- {memory_content}\n"
+                except Exception as e:
+                    print(f"⚠️ 检索用户偏好失败: {e}")
+            
+            # 将用户偏好附加到 chapter_context
+            enhanced_chapter_context = chapter_context_payload
+            if user_preferences_text:
+                enhanced_chapter_context = chapter_context_payload + user_preferences_text
+            
             scene = generate_scene_text(
                 scene_plan,
                 world,
                 characters,
                 previous_summary,
-                chapter_context=chapter_context_payload,
+                chapter_context=enhanced_chapter_context,
                 scene_memory_context=scene_memory_context,
                 verbose=self.verbose,
                 llm_config=self.config.scene_text_chain_config.llm_config
@@ -966,6 +1230,22 @@ class NovelOrchestrator:
             )
             self._append_chapter_memory_entry(memory_entry)
             print(f"✅ 第{chapter_number}章记忆条目已保存")
+            
+            # 更新角色状态到 Mem0（从 chapter_memory_entry 中提取）
+            if self.mem0_manager and memory_entry.character_states:
+                try:
+                    print(f"💾 正在更新角色状态到 Mem0...")
+                    for character_name, state_description in memory_entry.character_states.items():
+                        self.mem0_manager.add_entity_state(
+                            entity_id=character_name,
+                            entity_type="character",
+                            state_description=state_description,
+                            chapter_index=chapter_number,
+                        )
+                    print(f"✅ 已更新 {len(memory_entry.character_states)} 个角色状态到 Mem0")
+                except Exception as mem0_exc:
+                    print(f"⚠️ Mem0 角色状态更新失败: {mem0_exc}")
+            
         except Exception as exc:
             print(f"⚠️ 章节记忆生成失败：{exc}")
 

@@ -2,75 +2,87 @@
 NovelGen 主入口
 演示如何使用NovelGen生成小说
 """
+import os
+import json
 from novelgen.runtime.orchestrator import NovelOrchestrator
 
 
 def demo_full_flow(project_name):
-    """演示完整的小说生成流程"""
-    # 创建编排器（verbose=True 将显示详细日志）
+    """演示完整的小说生成流程（使用 LangGraph 工作流）"""
+    
+    # 1. 准备项目目录和 settings.json
+    project_dir = os.path.join("projects", project_name)
+    os.makedirs(project_dir, exist_ok=True)
+    
+    settings_path = os.path.join(project_dir, "settings.json")
+    
+    # 检查 settings.json 是否已存在
+    if not os.path.exists(settings_path):
+        print("📄 创建 settings.json...")
+        settings_data = {
+            "project_name": project_name,
+            "author": "Jamesenh",
+            # "llm_model": "gpt-4",
+            # "temperature": 0.7,
+            "persistence_enabled": True,
+            "vector_store_enabled": True,
+            "world_description": "一个2242年的未来地球，人类经历了\"大觉醒\"事件后，部分人类获得了操控量子能量的能力。社会分裂为三大阵营：保守的\"纯种人类联盟\"、追求进化的\"量子觉醒者\"、以及半机械改造的\"赛博融合体\"。地球资源枯竭，三大阵营争夺着火星殖民地的控制权，同时外太空的\"星际观察者\"文明正在默默关注着人类的内斗。科技高度发达，意识上传、虚拟现实、时空扭曲技术已经成熟，但也带来了伦理危机和身份认同的混乱。",
+            "theme_description": "关于人性与科技边界的故事：当人类能够通过科技无限强化自身时，什么才是真正的\"人类\"？探讨在追求永生和超能力的过程中，人类是否正在失去最珍贵的情感和道德底线。故事聚焦于一个来自保守阵营的年轻人意外觉醒量子能力后，在三大阵营间的艰难抉择，以及他对\"人性本质\"的重新定义。核心冲突包括：传统价值观 vs 科技进化、个体自由 vs 集体利益、真实情感 vs 虚拟体验。",
+            "num_chapters": 3
+        }
+        
+        with open(settings_path, 'w', encoding='utf-8') as f:
+            json.dump(settings_data, f, ensure_ascii=False, indent=2)
+        
+        print(f"✅ settings.json 已创建: {settings_path}")
+    else:
+        print(f"📂 settings.json 已存在: {settings_path}")
+    
+    # 2. 创建编排器
     orchestrator = NovelOrchestrator(project_name=project_name, verbose=False)
-    print(f"项目目录: {orchestrator.project_dir}")
-    print("提示：重复运行会自动续写，已生成的阶段会跳过(如需重建可传入 force=True)。")
+    print(f"📁 项目目录: {orchestrator.project_dir}")
     
-    # 步骤1: 创建世界观
+    # 3. 运行 LangGraph 工作流
     print("\n" + "="*60)
-    print("步骤1: 创建世界观")
+    print("🚀 开始运行 LangGraph 工作流")
     print("="*60)
-    world = orchestrator.step1_create_world(
-        "一个2242年的未来地球，人类经历了\"大觉醒\"事件后，部分人类获得了操控量子能量的能力。社会分裂为三大阵营：保守的\"纯种人类联盟\"、追求进化的\"量子觉醒者\"、以及半机械改造的\"赛博融合体\"。地球资源枯竭，三大阵营争夺着火星殖民地的控制权，同时外太空的\"星际观察者\"文明正在默默关注着人类的内斗。科技高度发达，意识上传、虚拟现实、时空扭曲技术已经成熟，但也带来了伦理危机和身份认同的混乱。"
-    )
-    print(f"世界名称: {world.world_name}")
+    print("提示：工作流将自动执行所有步骤：")
+    print("  1. 加载配置")
+    print("  2. 生成世界观")
+    print("  3. 生成主题冲突")
+    print("  4. 生成角色")
+    print("  5. 生成大纲")
+    print("  6. 生成章节计划")
+    print("  7. 生成章节文本")
+    print("  8. 一致性检查")
+    print()
     
-    # 步骤2: 创建主题冲突
-    print("\n" + "="*60)
-    print("步骤2: 创建主题冲突")
-    print("="*60)
-    theme_conflict = orchestrator.step2_create_theme_conflict(
-        "关于人性与科技边界的故事：当人类能够通过科技无限强化自身时，什么才是真正的\"人类\"？探讨在追求永生和超能力的过程中，人类是否正在失去最珍贵的情感和道德底线。故事聚焦于一个来自保守阵营的年轻人意外觉醒量子能力后，在三大阵营间的艰难抉择，以及他对\"人性本质\"的重新定义。核心冲突包括：传统价值观 vs 科技进化、个体自由 vs 集体利益、真实情感 vs 虚拟体验。"
-    )
-    print(f"核心主题: {theme_conflict.core_theme}")
-    
-    # 步骤3: 创建角色
-    print("\n" + "="*60)
-    print("步骤3: 创建角色")
-    print("="*60)
-    characters = orchestrator.step3_create_characters()
-    print(f"主角: {characters.protagonist.name}")
-    
-    # 步骤4: 创建大纲
-    print("\n" + "="*60)
-    print("步骤4: 创建大纲")
-    print("="*60)
-    outline = orchestrator.step4_create_outline(num_chapters=3)
-    print(f"章节数: {len(outline.chapters)}")
+    try:
+        # 运行工作流（不指定 stop_at，将执行全部步骤）
+        final_state = orchestrator.run_workflow()
+        
+        print("\n" + "="*60)
+        print("✅ 工作流执行完成！")
+        print("="*60)
+        print(f"当前步骤: {final_state.get('current_step')}")
+        print(f"已完成: {', '.join(final_state.get('completed_steps', []))}")
+        
+        if final_state.get('failed_steps'):
+            print(f"⚠️  失败步骤: {', '.join(final_state.get('failed_steps', []))}")
+            for step, error in final_state.get('error_messages', {}).items():
+                print(f"  - {step}: {error}")
+        
+        # 4. 导出章节
+        print("\n" + "="*60)
+        print("💾 导出章节")
+        print("="*60)
+        orchestrator.export_all_chapters()
+        
+    except Exception as e:
+        print(f"\n❌ 工作流执行失败: {e}")
+        import traceback
+        traceback.print_exc()
 
-    # print("\n" + "="*60)
-    # print("步骤5: 生成所有章节文本")
-    # print("="*60)
-    # orchestrator.generate_all_chapters()
-    
-    # 步骤5: 生成章节计划（演示全部章节生成）
-    print("\n" + "="*60)
-    print("步骤5: 生成章节计划（全部章节）")
-    print("="*60)
-    chapter_plans = orchestrator.step5_create_chapter_plan()  # 不传参数，自动生成全部章节
-    print(f"已生成 {len(chapter_plans)} 个章节计划")
-    
-    # 步骤6: 生成章节文本（演示部分章节生成）
-    print("\n" + "="*60)
-    print("步骤6: 生成章节文本（全部章节）")
-    print("="*60)
-    orchestrator.generate_all_chapters()  # 生成全部章节
-    print("已生成全部章节文本")
-    
-    # 可选：生成剩余章节
-    # print("\n" + "="*60)
-    # print("生成剩余章节文本")
-    # print("="*60)
-    # orchestrator.generate_all_chapters()  # 生成全部章节
-    # print("已生成全部章节文本")
-    
-    orchestrator.export_all_chapters()
 
 def export_novel_cmd(project_name: str):
     """
@@ -94,15 +106,6 @@ def export_chapter_cmd(project_name: str, chapter_number: int):
     orchestrator = NovelOrchestrator(project_name=project_name)
     orchestrator.export_chapter(chapter_number)
 
-def export_novel_cmd(project_name: str):
-    """
-    导出整本小说为txt文件
-    
-    Args:
-        project_name: 项目名称
-    """
-    orchestrator = NovelOrchestrator(project_name=project_name)
-    orchestrator.export_all_chapters()
 
 def apply_revision_cmd(project_name: str, chapter_number: int, rebuild_memory: bool = True):
     """
@@ -120,7 +123,7 @@ def apply_revision_cmd(project_name: str, chapter_number: int, rebuild_memory: b
 if __name__ == "__main__":
     # test_generate_chapter_text()
     try:
-        demo_full_flow("demo_011")
+        demo_full_flow("demo_012")
     except KeyboardInterrupt:
         print("\n程序被用户中断")
     # export_novel_cmd("demo_001")

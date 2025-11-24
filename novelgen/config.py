@@ -3,9 +3,12 @@
 管理LLM配置、API密钥等
 """
 import os
-from typing import Optional, Dict, Literal
+from typing import Optional, Dict, Literal, TYPE_CHECKING
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
+
+if TYPE_CHECKING:
+    from novelgen.models import Mem0Config
 
 
 # 在模块导入阶段自动加载默认的 .env 文件，支持 .env.local 优先级
@@ -208,6 +211,17 @@ class ProjectConfig(BaseModel):
                 data["vector_store_dir"] = env_vector_dir
 
         super().__init__(**data)
+        
+        # 初始化 Mem0 配置（在 super().__init__ 之后，确保 get_vector_store_dir() 可用）
+        if self.mem0_config is None:
+            mem0_enabled = os.getenv("MEM0_ENABLED", "false").lower() in ("true", "1", "yes", "on")
+            if mem0_enabled:
+                from novelgen.models import Mem0Config
+                self.mem0_config = Mem0Config(
+                    enabled=True,
+                    chroma_path=self.get_vector_store_dir(),  # 复用现有向量存储路径
+                    api_key=os.getenv("MEM0_API_KEY"),
+                )
 
     # 各个链的配置，设置不同的chain_name
     world_chain_config: ChainConfig = Field(
@@ -253,6 +267,10 @@ class ProjectConfig(BaseModel):
     embedding_config: EmbeddingConfig = Field(
         default_factory=EmbeddingConfig,
         description="Embedding模型配置"
+    )
+    mem0_config: Optional["Mem0Config"] = Field(
+        default=None,
+        description="Mem0 配置（可选）"
     )
 
     @property
@@ -304,3 +322,13 @@ class ProjectConfig(BaseModel):
             return os.path.join(self.project_dir, self.vector_store_dir)
         # 默认使用 project_dir/data/vectors
         return os.path.join(self.project_dir, "data", "vectors")
+
+
+# 解决前向引用：在所有类定义完成后，导入 Mem0Config 并重建 ProjectConfig 模型
+# 这样 Pydantic 就可以正确解析 mem0_config 字段的类型
+try:
+    from novelgen.models import Mem0Config
+    ProjectConfig.model_rebuild()
+except ImportError:
+    # 如果 models.py 还未定义 Mem0Config（如在测试环境），忽略错误
+    pass
