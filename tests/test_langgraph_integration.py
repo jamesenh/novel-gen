@@ -60,7 +60,8 @@ def test_workflow_state_creation():
             "project_name": "test_state",
             "author": "Test Author",
             "llm_model": "gpt-4o-mini",
-            "temperature": 0.7
+            "temperature": 0.7,
+            "world_description": "测试世界描述"
         }
         settings_path = os.path.join(orchestrator.project_dir, "settings.json")
         with open(settings_path, 'w', encoding='utf-8') as f:

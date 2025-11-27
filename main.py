@@ -24,8 +24,6 @@ def demo_full_flow(project_name):
             "author": "Jamesenh",
             # "llm_model": "gpt-4",
             # "temperature": 0.7,
-            "persistence_enabled": True,
-            "vector_store_enabled": True,
             "world_description": "一个2242年的未来地球，人类经历了\"大觉醒\"事件后，部分人类获得了操控量子能量的能力。社会分裂为三大阵营：保守的\"纯种人类联盟\"、追求进化的\"量子觉醒者\"、以及半机械改造的\"赛博融合体\"。地球资源枯竭，三大阵营争夺着火星殖民地的控制权，同时外太空的\"星际观察者\"文明正在默默关注着人类的内斗。科技高度发达，意识上传、虚拟现实、时空扭曲技术已经成熟，但也带来了伦理危机和身份认同的混乱。",
             "theme_description": "关于人性与科技边界的故事：当人类能够通过科技无限强化自身时，什么才是真正的\"人类\"？探讨在追求永生和超能力的过程中，人类是否正在失去最珍贵的情感和道德底线。故事聚焦于一个来自保守阵营的年轻人意外觉醒量子能力后，在三大阵营间的艰难抉择，以及他对\"人性本质\"的重新定义。核心冲突包括：传统价值观 vs 科技进化、个体自由 vs 集体利益、真实情感 vs 虚拟体验。",
             "num_chapters": 3
@@ -123,7 +121,7 @@ def apply_revision_cmd(project_name: str, chapter_number: int, rebuild_memory: b
 if __name__ == "__main__":
     # test_generate_chapter_text()
     try:
-        demo_full_flow("demo_012")
+        demo_full_flow("demo_013")
     except KeyboardInterrupt:
         print("\n程序被用户中断")
     # export_novel_cmd("demo_001")

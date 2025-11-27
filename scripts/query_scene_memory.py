@@ -2,9 +2,10 @@
 """
 场景记忆查询CLI工具
 用于查询指定场景相关的记忆块
+
+更新: 2025-11-25 - 使用 Mem0Manager 作为唯一记忆源
 """
 import sys
-import json
 import argparse
 from pathlib import Path
 from datetime import datetime
@@ -12,8 +13,9 @@ from datetime import datetime
 # 添加项目根目录到路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from novelgen.runtime.vector_store import VectorStoreManager
+from novelgen.runtime.mem0_manager import Mem0Manager, Mem0InitializationError
 from novelgen.config import ProjectConfig
+from novelgen.models import Mem0Config
 
 
 def format_timestamp(ts: datetime) -> str:
@@ -51,24 +53,17 @@ def print_memory_chunk(chunk, index: int, total: int, verbose: bool = False):
 
 
 def query_scene_memory(project_id: str, chapter_index: int, scene_index: int,
-                       vector_store_path: str, embedding_config = None, 
+                       mem0_manager: Mem0Manager,
                        limit: int = 10, verbose: bool = False):
     """查询场景相关的记忆块"""
     print(f"\n正在查询项目 '{project_id}' 章节 {chapter_index} 场景 {scene_index} 的记忆块...")
     
-    # 初始化向量存储管理器
-    vector_manager = VectorStoreManager(
-        persist_directory=vector_store_path, 
-        enabled=True,
-        embedding_config=embedding_config
-    )
-    
-    if not vector_manager.is_enabled():
-        print("❌ 错误: 向量存储未能成功初始化")
-        return 1
-    
     # 查询记忆块
-    chunks = vector_manager.get_chunks_by_project(project_id, chapter_index)
+    chunks = mem0_manager.search_scene_content(
+        query=f"第{chapter_index}章场景{scene_index}的内容",
+        chapter_index=chapter_index,
+        limit=limit * 2  # 获取更多用于过滤
+    )
     
     # 过滤指定场景的记忆块
     scene_chunks = [
@@ -91,47 +86,9 @@ def query_scene_memory(project_id: str, chapter_index: int, scene_index: int,
         return 1
 
 
-def query_by_entity(project_id: str, entity_ids: list, chapter_index: int = None,
-                    vector_store_path: str = None, embedding_config = None,
-                    limit: int = 10, verbose: bool = False):
-    """根据实体ID查询相关记忆块"""
-    entity_str = ', '.join(entity_ids)
-    print(f"\n正在查询项目 '{project_id}' 中与实体 [{entity_str}] 相关的记忆块...")
-    if chapter_index is not None:
-        print(f"限定章节: {chapter_index}")
-    
-    # 初始化向量存储管理器
-    vector_manager = VectorStoreManager(
-        persist_directory=vector_store_path, 
-        enabled=True,
-        embedding_config=embedding_config
-    )
-    
-    if not vector_manager.is_enabled():
-        print("❌ 错误: 向量存储未能成功初始化")
-        return 1
-    
-    # 查询记忆块
-    chunks = vector_manager.get_chunks_by_entities(project_id, entity_ids, chapter_index)
-    
-    # 限制数量
-    if len(chunks) > limit:
-        print(f"⚠️  找到 {len(chunks)} 个记忆块，仅显示前 {limit} 个")
-        chunks = chunks[:limit]
-    
-    if chunks:
-        print(f"✅ 找到 {len(chunks)} 个记忆块:")
-        for i, chunk in enumerate(chunks, 1):
-            print_memory_chunk(chunk, i, len(chunks), verbose)
-        return 0
-    else:
-        print(f"❌ 未找到与实体相关的记忆块")
-        return 1
-
-
-def search_memory(project_id: str, query: str, vector_store_path: str,
+def search_memory(project_id: str, query: str, mem0_manager: Mem0Manager,
                  content_type: str = None, entities: list = None,
-                 tags: list = None, embedding_config = None,
+                 tags: list = None,
                  limit: int = 10, verbose: bool = False):
     """搜索记忆块"""
     print(f"\n正在搜索项目 '{project_id}' 中的记忆块...")
@@ -143,20 +100,13 @@ def search_memory(project_id: str, query: str, vector_store_path: str,
     if tags:
         print(f"标签过滤: {', '.join(tags)}")
     
-    # 初始化向量存储管理器
-    vector_manager = VectorStoreManager(
-        persist_directory=vector_store_path, 
-        enabled=True,
-        embedding_config=embedding_config
-    )
-    
-    if not vector_manager.is_enabled():
-        print("❌ 错误: 向量存储未能成功初始化")
-        return 1
-    
     # 搜索记忆块
-    chunks = vector_manager.search_memory_with_filters(
-        query, project_id, content_type, entities, tags, limit
+    chunks = mem0_manager.search_memory_with_filters(
+        query=query,
+        content_type=content_type,
+        entities=entities,
+        tags=tags,
+        limit=limit
     )
     
     if chunks:
@@ -171,15 +121,12 @@ def search_memory(project_id: str, query: str, vector_store_path: str,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="查询场景记忆块",
+        description="查询场景记忆块（使用 Mem0）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
   # 查询指定场景的记忆块
   python scripts/query_scene_memory.py my_project --chapter 1 --scene 0
-  
-  # 根据实体查询记忆块
-  python scripts/query_scene_memory.py my_project --entity char_001 char_002
   
   # 搜索记忆块
   python scripts/query_scene_memory.py my_project --search "主角决定离开"
@@ -190,12 +137,10 @@ def main():
     )
     
     parser.add_argument("project_id", help="项目ID")
-    parser.add_argument("--vector-store", default=None, help="向量存储路径（默认从配置读取）")
     
     # 查询模式
     mode_group = parser.add_mutually_exclusive_group(required=True)
     mode_group.add_argument("--scene", action="store_true", help="按场景查询（需配合--chapter和--scene-index）")
-    mode_group.add_argument("--entity", nargs="+", help="按实体ID查询")
     mode_group.add_argument("--search", help="搜索记忆块")
     
     # 场景查询选项
@@ -213,18 +158,24 @@ def main():
     
     args = parser.parse_args()
     
-    # 确定向量存储路径和embedding配置
-    if args.vector_store:
-        vector_store_path = args.vector_store
-        embedding_config = None  # 使用默认配置
-    else:
-        config = ProjectConfig(project_dir=f"projects/{args.project_id}")
-        vector_store_path = config.get_vector_store_dir()
-        embedding_config = config.embedding_config
+    # 初始化 Mem0 管理器
+    config = ProjectConfig(project_dir=f"projects/{args.project_id}")
     
-    print(f"使用向量存储: {vector_store_path}")
-    if embedding_config:
-        print(f"使用 embedding 模型: {embedding_config.model_name}")
+    if not config.mem0_config or not config.mem0_config.enabled:
+        print("❌ 错误: Mem0 未启用。请设置环境变量 MEM0_ENABLED=true")
+        return 1
+    
+    try:
+        mem0_manager = Mem0Manager(
+            config=config.mem0_config,
+            project_id=args.project_id,
+            embedding_config=config.embedding_config
+        )
+    except Mem0InitializationError as e:
+        print(f"❌ Mem0 初始化失败: {e}")
+        return 1
+    
+    print(f"使用 Mem0 记忆层: {config.mem0_config.chroma_path}")
     
     # 执行查询
     try:
@@ -234,18 +185,13 @@ def main():
                 return 1
             return query_scene_memory(
                 args.project_id, args.chapter, args.scene_index,
-                vector_store_path, embedding_config, args.limit, args.verbose
-            )
-        elif args.entity:
-            return query_by_entity(
-                args.project_id, args.entity, args.chapter,
-                vector_store_path, embedding_config, args.limit, args.verbose
+                mem0_manager, args.limit, args.verbose
             )
         elif args.search:
             return search_memory(
-                args.project_id, args.search, vector_store_path,
+                args.project_id, args.search, mem0_manager,
                 args.content_type, args.entities, args.tags,
-                embedding_config, args.limit, args.verbose
+                args.limit, args.verbose
             )
     except KeyboardInterrupt:
         print("\n\n⚠️  用户中断")

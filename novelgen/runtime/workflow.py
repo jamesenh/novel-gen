@@ -3,10 +3,14 @@ LangGraph 工作流定义
 定义小说生成的 StateGraph 工作流
 
 开发者: jamesenh, 开发时间: 2025-11-21
+更新: 2025-11-25 - 使用 SqliteSaver 替代 MemorySaver 实现检查点持久化
 """
-from typing import Literal
+import os
+import sqlite3
+from typing import Literal, Optional
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
 
 from novelgen.models import NovelGenerationState
 from novelgen.runtime.nodes import (
@@ -24,7 +28,7 @@ from novelgen.runtime.nodes import (
 )
 
 
-def create_novel_generation_workflow(checkpointer=None):
+def create_novel_generation_workflow(checkpointer=None, project_dir: Optional[str] = None):
     """
     创建小说生成工作流（逐章生成模式）
     
@@ -33,7 +37,8 @@ def create_novel_generation_workflow(checkpointer=None):
     2. 循环生成：[生成单章 → 一致性检测 → 修订(如需要) → 下一章] × N
     
     Args:
-        checkpointer: 检查点保存器，默认使用 MemorySaver
+        checkpointer: 检查点保存器（可选）
+        project_dir: 项目目录，用于存储 SQLite 检查点数据库
     
     Returns:
         编译后的 StateGraph 工作流
@@ -130,9 +135,16 @@ def create_novel_generation_workflow(checkpointer=None):
         }
     )
     
-    # 配置 checkpointer（如果未提供，使用 MemorySaver）
+    # 配置 checkpointer
+    # 如果提供了 project_dir，使用 SqliteSaver 持久化检查点
+    # 否则降级到 MemorySaver（内存模式，重启后丢失）
     if checkpointer is None:
-        checkpointer = MemorySaver()
+        if project_dir:
+            db_path = os.path.join(project_dir, "workflow_checkpoints.db")
+            conn = sqlite3.connect(db_path, check_same_thread=False)
+            checkpointer = SqliteSaver(conn)
+        else:
+            checkpointer = MemorySaver()
     
     # 编译工作流
     app = workflow.compile(checkpointer=checkpointer)
@@ -163,5 +175,5 @@ def visualize_workflow(workflow_app, output_format: str = "mermaid") -> str:
         return f"不支持的格式: {output_format}"
 
 
-# 默认工作流实例（使用 MemorySaver）
-default_workflow = create_novel_generation_workflow()
+# 注意：不再提供默认工作流实例，因为需要 project_dir 参数来启用持久化
+# 请使用 create_novel_generation_workflow(project_dir=...) 创建工作流实例

@@ -8,13 +8,14 @@ from pydantic import BaseModel, Field
 
 
 class Settings(BaseModel):
-    """全局设置"""
+    """全局设置
+    
+    更新: 2025-11-25 - 移除 persistence_enabled 和 vector_store_enabled，统一使用 Mem0
+    """
     project_name: str = Field(description="项目名称")
     author: str = Field(default="Jamesenh", description="作者")
     llm_model: str = Field(default="gpt-4", description="使用的LLM模型")
     temperature: float = Field(default=0.7, description="生成温度")
-    persistence_enabled: bool = Field(default=True, description="是否启用数据持久化")
-    vector_store_enabled: bool = Field(default=True, description="是否启用向量存储")
     
     # 用户输入字段（用于工作流）
     world_description: str = Field(description="世界观描述")
@@ -246,6 +247,7 @@ class NovelGenerationState(BaseModel):
     统一管理整个小说生成流程的状态
     
     开发者: jamesenh, 开发时间: 2025-11-21
+    更新: 2025-11-25 - 移除 db_manager/vector_manager，使用 mem0_manager
     """
     # 项目元信息
     project_name: str = Field(description="项目名称")
@@ -277,10 +279,5 @@ class NovelGenerationState(BaseModel):
     failed_steps: List[str] = Field(default_factory=list, description="失败步骤列表")
     error_messages: Dict[str, str] = Field(default_factory=dict, description="错误消息（步骤 -> 错误信息）")
     
-    # 可选：持久化管理器引用（不序列化，通过 model_config 排除）
-    # 注：这些字段在实际使用时通过 workflow context 传递，不需要序列化到 JSON
-    db_manager: Optional[Any] = Field(default=None, description="数据库管理器引用", exclude=True)
-    vector_manager: Optional[Any] = Field(default=None, description="向量存储管理器引用", exclude=True)
-    
-    class Config:
-        arbitrary_types_allowed = True  # 允许任意类型（用于 db_manager, vector_manager）
+    # 注意：Mem0Manager 不能放在状态中，因为 LangGraph 的 checkpoint 使用 msgpack 序列化，
+    # 无法序列化复杂对象。应通过 orchestrator 级别管理 mem0_manager。

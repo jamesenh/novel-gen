@@ -1,41 +1,48 @@
-# Mem0 集成设置指南
+# Mem0 记忆层设置指南
 
 ## 简介
 
-Mem0 是一个专为 LLM 应用设计的智能记忆层，提供自动去重、冲突解决和时间衰减机制。本项目集成 Mem0 实现：
+Mem0 是本项目的唯一记忆存储层，提供：
 
 1. **用户记忆（User Memory）**：学习作者的写作偏好和反馈
 2. **实体记忆（Entity Memory）**：管理角色的动态状态，自动合并和更新
+3. **场景内容存储**：存储和检索场景文本内容
+
+> **更新说明（2025-11-25）**：从本版本开始，Mem0 是必需的记忆层，不再支持 SQLite 降级模式。
 
 ## 核心特性
 
-### ✅ 零额外部署
-- 复用项目现有的 ChromaDB 实例
-- 无需部署 Qdrant 或其他向量数据库
-- 通过独立的 `collection_name` 隔离 Mem0 数据
+### ✅ 统一记忆层
+- Mem0 作为唯一的记忆存储层
+- 内部使用 ChromaDB 进行向量存储
+- 所有记忆操作都通过 Mem0Manager 进行
 
 ### ✅ 智能记忆管理
 - 自动去重：相似的偏好会被自动合并
 - 冲突解决：自动处理矛盾的状态信息
 - 时间衰减：旧的记忆自动降权
 
-### ✅ 向后兼容
-- Mem0 作为可选功能，默认禁用
-- 启用后，SQLite 和 ChromaDB 仍作为降级备份
-- 禁用 Mem0 不影响现有功能
+### ✅ 简化架构
+- 移除独立的 SQLite 数据库管理器
+- 移除独立的 VectorStore 管理器
+- 统一的记忆访问接口
 
 ## 快速开始
 
-### 1. 启用 Mem0
+### 1. 启用 Mem0（必需）
 
 在项目根目录的 `.env` 文件中添加：
 
 ```bash
-# 启用 Mem0
+# 启用 Mem0（必需）
 MEM0_ENABLED=true
 
 # OpenAI API Key（必需，用于 Embedding）
 OPENAI_API_KEY=your_openai_api_key_here
+
+# 可选：自定义 Embedding 模型
+# EMBEDDING_MODEL_NAME=text-embedding-3-small
+# EMBEDDING_API_KEY=your_key  # 如果与 OPENAI_API_KEY 不同
 ```
 
 ### 2. 运行项目
@@ -53,8 +60,6 @@ python main.py
 启动时查看日志输出：
 
 ```
-✅ 数据库持久化已启用: projects/demo_001/data/novel.db
-✅ 向量存储已启用: projects/demo_001/data/vectors
 ✅ Mem0 记忆层已启用: Mem0 运行正常
 ✅ LangGraph 工作流已初始化
 ```
@@ -65,8 +70,10 @@ python main.py
 
 | 变量名 | 描述 | 默认值 | 必需 |
 |--------|------|--------|------|
-| `MEM0_ENABLED` | 是否启用 Mem0 | `false` | 否 |
-| `OPENAI_API_KEY` | OpenAI API Key（用于 Embedding） | - | 是（启用时） |
+| `MEM0_ENABLED` | 是否启用 Mem0 | `false` | **是** |
+| `OPENAI_API_KEY` | OpenAI API Key（用于 Embedding） | - | **是** |
+| `EMBEDDING_MODEL_NAME` | Embedding 模型名称 | `text-embedding-3-small` | 否 |
+| `EMBEDDING_BASE_URL` | 自定义 API 端点 | - | 否 |
 
 ### 高级配置
 
@@ -80,35 +87,94 @@ from novelgen.models import Mem0Config
 config = ProjectConfig(project_dir="projects/demo_001")
 config.mem0_config = Mem0Config(
     enabled=True,
-    chroma_path=config.get_vector_store_dir(),  # 复用现有 ChromaDB
+    chroma_path=config.get_vector_store_dir(),  # ChromaDB 存储路径
     collection_name="custom_mem0_memories",      # 自定义 collection 名称
     embedding_model_dims=1536,                   # Embedding 维度
     timeout=10,                                  # 查询超时（秒）
 )
 ```
 
-## ChromaDB 数据隔离
+## Mem0Manager API
 
-Mem0 和现有向量检索共享同一个 ChromaDB 实例，但数据完全隔离：
+### 用户偏好
 
+```python
+# 添加用户偏好
+mem0_manager.add_user_preference(
+    preference_type="writing_style",
+    content="喜欢使用细腻的心理描写",
+    source="manual"
+)
+
+# 搜索用户偏好
+preferences = mem0_manager.search_user_preferences(
+    query="写作风格",
+    limit=5
+)
 ```
-ChromaDB 实例 (data/vectors/)
-├── novel_memories (现有场景文本、摘要)
-└── mem0_memories  (Mem0 用户偏好、实体状态)
+
+### 实体状态
+
+```python
+# 添加实体状态
+mem0_manager.add_entity_state(
+    entity_id="张三",
+    entity_type="character",
+    state_description="在第一章中首次登场，表现出强烈的好奇心",
+    chapter_index=1,
+)
+
+# 获取实体状态
+states = mem0_manager.get_entity_state(
+    entity_id="张三",
+    query="张三的当前状态",
+    limit=3
+)
+
+# 批量获取角色状态
+snapshots = mem0_manager.get_entity_states_for_characters(
+    character_names=["张三", "李四"],
+    chapter_index=2,
+)
+```
+
+### 场景内容
+
+```python
+# 添加场景内容
+chunks = mem0_manager.add_scene_content(
+    content="场景文本内容...",
+    chapter_index=1,
+    scene_index=1,
+)
+
+# 搜索场景内容
+results = mem0_manager.search_scene_content(
+    query="主角决定离开",
+    chapter_index=1,  # 可选
+    limit=10
+)
+
+# 搜索记忆（带过滤条件）
+results = mem0_manager.search_memory_with_filters(
+    query="关于战斗的场景",
+    content_type="scene",
+    entities=["张三"],
+    limit=10
+)
 ```
 
 ## 工作原理
 
 ### 用户记忆（User Memory）
 
-**记录时机**（预留功能）：
-- **当前版本**：不从章节修订过程中自动提取用户偏好（修订是针对具体章节的一致性校验，不应作为长期写作偏好）
-- **未来支持**：通过主动设置、UI 交互等方式添加用户偏好
-- 示例：通过 API 主动设置「对话需简洁有力，避免过多形容词」
+**记录时机**：
+- 通过 API 主动设置用户偏好
+- 未来支持：通过 UI 交互添加
 
 **使用时机**：
 - 场景生成前，检索相关的用户偏好
-- 将偏好注入到 `chapter_context` 中，指导 LLM 生成符合用户风格的文本
+- 将偏好注入到 `chapter_context` 中
 
 **示例输出**：
 ```
@@ -116,22 +182,31 @@ ChromaDB 实例 (data/vectors/)
 以下是用户设定的写作偏好，请在生成时参考：
 - [writing_style] 喜欢使用细腻的心理描写，避免过于直白的叙述
 - [tone] 整体基调偏向悬疑和紧张感
-- [character_development] 角色性格应该逐渐演变，避免突变
 ```
 
 ### 实体记忆（Entity Memory）
 
 **记录时机**：
+- 角色创建时初始化状态
 - 每章生成后，从 `ChapterMemoryEntry` 中提取 `character_states`
-- 将每个角色的状态更新到 Mem0
 
 **使用时机**：
-- 场景生成前，优先从 Mem0 检索角色的最新状态
-- 如果 Mem0 查询失败，回退到 SQLite 的 `EntityStateSnapshot`
+- 场景生成前，从 Mem0 检索角色的最新状态
+- 注入到场景记忆上下文中
 
 **自动合并**：
 - Mem0 会自动合并相似的状态描述
 - 例如：「张三变得更加谨慎」 + 「张三开始警惕周围的人」 → 「张三变得谨慎且警惕」
+
+### 场景内容存储
+
+**记录时机**：
+- 每个场景生成后自动存储到 Mem0
+- 内容会被自动分块并向量化
+
+**使用时机**：
+- 生成新场景时检索相关历史内容
+- 支持语义搜索和过滤
 
 ## 数据管理
 
@@ -145,6 +220,12 @@ uv run python scripts/check_mem0_health.py
 
 # 导出 Mem0 数据到 JSON
 uv run python scripts/export_mem0_to_json.py --project demo_001
+
+# 查询实体状态
+uv run python scripts/query_entity.py demo_001 张三 --latest
+
+# 搜索场景记忆
+uv run python scripts/query_scene_memory.py demo_001 --search "主角决定"
 
 # 清理 Mem0 数据（测试用）
 uv run python scripts/clear_mem0_memory.py --project demo_001
@@ -164,83 +245,65 @@ Mem0 数据存储在 ChromaDB 中，备份方式：
    uv run python scripts/export_mem0_to_json.py --project demo_001 --output mem0_backup.json
    ```
 
-## 性能优化
-
-### 查询超时
-
-默认查询超时为 5 秒，可以根据网络情况调整：
-
-```python
-config.mem0_config.timeout = 10  # 增加到 10 秒
-```
-
-### 批量操作
-
-Mem0 支持批量添加记忆，可以减少网络开销：
-
-```python
-# 在 mem0_manager.py 中使用 client.add() 时
-# 可以传递多个 messages 实现批量添加
-```
-
 ## 故障排查
+
+### Mem0 未启用
+
+**症状**：
+```
+RuntimeError: Mem0 未启用。请设置环境变量 MEM0_ENABLED=true。
+```
+
+**解决方案**：
+1. 在 `.env` 文件中设置 `MEM0_ENABLED=true`
+2. 确保环境变量正确加载
 
 ### Mem0 初始化失败
 
 **症状**：
 ```
-⚠️ Mem0 初始化失败: The api_key client option must be set
+Mem0InitializationError: Embedding API Key 未设置
 ```
 
 **解决方案**：
 1. 确认 `.env` 文件中设置了 `OPENAI_API_KEY`
 2. 检查 API Key 是否有效
 
-### Mem0 查询超时
+### 查询失败
 
 **症状**：
 ```
-⚠️ 检索用户偏好失败: Request timed out.
+❌ 搜索场景内容失败: Request timed out.
 ```
 
 **解决方案**：
 1. 增加 `timeout` 配置
 2. 检查网络连接
-3. 系统会自动降级到 SQLite，不影响主流程
-
-### 数据不同步
-
-**症状**：Mem0 和 SQLite 数据不一致
-
-**解决方案**：
-1. Mem0 作为主查询源，SQLite 作为降级备份
-2. 使用 `scripts/sync_mem0_to_sqlite.py` 同步数据（待实现）
+3. 检查 API 配额
 
 ## 常见问题
 
+### Q: Mem0 是必需的吗？
+
+A: 是的。从 2025-11-25 版本开始，Mem0 是唯一的记忆层，不再支持降级模式。必须设置 `MEM0_ENABLED=true` 才能运行项目。
+
+### Q: 如何迁移旧项目？
+
+A: 旧项目的 JSON 文件（world.json, characters.json 等）仍然可用。Mem0 会在运行时自动初始化角色状态。SQLite 数据库和独立向量存储不再使用。
+
 ### Q: Mem0 会增加多少延迟？
 
-A: Mem0 查询是异步且并行的，通常在 100-500ms 范围内。如果超时，系统会自动降级到 SQLite。
+A: Mem0 查询通常在 100-500ms 范围内，取决于网络条件和数据量。
 
-### Q: 如何迁移现有项目的数据到 Mem0？
+### Q: 可以使用其他 Embedding 模型吗？
 
-A: 暂不支持历史数据迁移。Mem0 仅对新生成内容生效，历史数据仍由 SQLite/ChromaDB 管理。
-
-### Q: 可以同时使用 Mem0 和 SQLite 吗？
-
-A: 是的。Mem0 启用时，系统会同时写入 Mem0 和 SQLite（双写策略），确保数据完整性。
-
-### Q: Mem0 是否支持 Graph Memory？
-
-A: 当前版本暂不支持。未来如果需要复杂的关系推理，可以考虑扩展。
+A: 可以。通过设置 `EMBEDDING_MODEL_NAME` 和 `EMBEDDING_BASE_URL` 环境变量使用自定义模型。
 
 ## 相关文档
 
 - [Mem0 官方文档](https://docs.mem0.ai/)
 - [项目 OpenSpec 提案](../openspec/changes/add-mem0-integration/proposal.md)
-- [迁移指南](./mem0-migration.md)
 
 ## 贡献与反馈
 
 如果在使用 Mem0 时遇到问题或有改进建议，请提交 Issue 或 PR。
-

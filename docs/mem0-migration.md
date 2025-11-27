@@ -2,40 +2,45 @@
 
 ## 概述
 
-本指南说明如何从纯 SQLite/ChromaDB 架构迁移到 Mem0 增强模式。
+本指南说明如何从旧版架构（SQLite + 独立 VectorStore）迁移到新的 Mem0 统一记忆层。
 
-## 迁移策略
+> **重要更新（2025-11-25）**：Mem0 现在是唯一的记忆层，不再支持 SQLite 降级模式。
 
-### 渐进式迁移（推荐）
+## 架构变化
 
-Mem0 采用"增强而非替换"的设计，支持渐进式迁移：
+### 旧架构
 
-1. **阶段 1：测试环境启用**
-   - 在新项目中启用 Mem0
-   - 验证功能是否正常
-   - 评估性能影响
+```
+记忆存储
+├── DatabaseManager (SQLite)
+│   ├── entity_snapshots 表
+│   └── memory_chunks 表
+└── VectorStoreManager (ChromaDB)
+    └── 场景内容向量
+```
 
-2. **阶段 2：现有项目逐步启用**
-   - 选择 1-2 个现有项目启用 Mem0
-   - 观察记忆学习效果
-   - 收集用户反馈
+### 新架构
 
-3. **阶段 3：全面推广**
-   - 默认启用 Mem0
-   - 保留 SQLite 作为降级方案
+```
+记忆存储
+└── Mem0Manager (唯一记忆层)
+    ├── 用户偏好 (User Memory)
+    ├── 实体状态 (Entity Memory)
+    └── 场景内容 (内部使用 ChromaDB)
+```
 
 ## 迁移步骤
 
 ### 1. 环境准备
 
-确保已安装 `mem0ai` 依赖：
+确保已安装最新依赖：
 
 ```bash
 # 使用 uv
-uv pip install mem0ai
+uv sync
 
 # 或使用 pip
-pip install mem0ai
+pip install -r requirements.txt
 ```
 
 ### 2. 配置环境变量
@@ -43,14 +48,17 @@ pip install mem0ai
 在 `.env` 文件中添加：
 
 ```bash
-# 启用 Mem0
+# 启用 Mem0（必需）
 MEM0_ENABLED=true
 
 # OpenAI API Key（必需）
 OPENAI_API_KEY=your_openai_api_key_here
+
+# 可选配置
+# EMBEDDING_MODEL_NAME=text-embedding-3-small
 ```
 
-### 3. 运行健康检查
+### 3. 验证配置
 
 ```bash
 uv run python scripts/check_mem0_health.py
@@ -64,161 +72,169 @@ uv run python scripts/check_mem0_health.py
   - Collection: mem0_memories
 ```
 
-### 4. 开始新项目
+### 4. 运行项目
 
 ```bash
 uv run python main.py
 ```
 
-Mem0 会自动开始工作：
+## 代码变化
 
-- **用户偏好**：预留功能框架，当前需主动设置（不从修订过程中自动提取）
-- **角色状态**：从章节生成中自动更新
+### NovelOrchestrator 变化
 
-### 5. 验证效果
-
-生成 2-3 章后，检查 Mem0 是否学习到偏好：
-
-```bash
-uv run python scripts/export_mem0_to_json.py --project demo_001
+**旧代码**：
+```python
+# 初始化多个管理器
+self.db_manager = DatabaseManager(db_path, enabled=True)
+self.vector_manager = VectorStoreManager(vector_dir, enabled=True)
+self.mem0_manager = Mem0Manager(config, project_id, embedding_config)
 ```
 
-查看导出的 JSON 文件，确认：
-- 用户偏好是否被正确记录
-- 角色状态是否被自动更新
+**新代码**：
+```python
+# 只初始化 Mem0
+self.mem0_manager = Mem0Manager(
+    config=self.config.mem0_config,
+    project_id=project_name,
+    embedding_config=self.config.embedding_config
+)
+```
+
+### 保存实体状态
+
+**旧代码**：
+```python
+def _save_entity_snapshot(self, ...):
+    if self.db_manager and self.db_manager.is_enabled():
+        self.db_manager.save_entity_snapshot(snapshot)
+```
+
+**新代码**：
+```python
+def _save_entity_state(self, ...):
+    self.mem0_manager.add_entity_state(
+        entity_id=entity_id,
+        entity_type=entity_type,
+        state_description=state_description,
+        chapter_index=chapter_index,
+    )
+```
+
+### 保存场景内容
+
+**旧代码**：
+```python
+def _save_scene_content_to_vector(self, ...):
+    if self.vector_manager and self.vector_manager.is_enabled():
+        chunks = self.vector_manager.add_scene_content(...)
+        if self.db_manager:
+            for chunk in chunks:
+                self.db_manager.save_memory_chunk(chunk)
+```
+
+**新代码**：
+```python
+def _save_scene_content(self, ...):
+    chunks = self.mem0_manager.add_scene_content(
+        content=content,
+        chapter_index=chapter_index,
+        scene_index=scene_index,
+    )
+```
+
+### 检索记忆
+
+**旧代码**：
+```python
+# 从 VectorStoreManager 检索
+chunks = vector_manager.search_memory_with_filters(...)
+
+# 从 DatabaseManager 检索状态
+snapshot = db_manager.get_latest_entity_state(...)
+```
+
+**新代码**：
+```python
+# 统一从 Mem0 检索
+chunks = mem0_manager.search_memory_with_filters(...)
+states = mem0_manager.get_entity_state(...)
+```
+
+## 已删除的文件
+
+以下文件已被删除：
+
+- `novelgen/runtime/db.py` - SQLite 数据库管理器
+- `novelgen/runtime/db_migrations.py` - 数据库迁移
+- `novelgen/runtime/vector_store.py` - 独立向量存储管理器
+- `novelgen/runtime/test_db.py` - 数据库测试
+- `novelgen/runtime/test_vector_store.py` - 向量存储测试
+- `novelgen/runtime/test_orchestrator_integration.py` - 旧集成测试
+- `novelgen/runtime/reindex_tools.py` - 向量重建工具
+
+## 已删除的配置
+
+以下配置项已被移除：
+
+- `ProjectConfig.persistence_enabled`
+- `ProjectConfig.vector_store_enabled`
+- `ProjectConfig.db_path`
+- `ProjectConfig.get_db_path()`
+- `Settings.persistence_enabled`
+- `Settings.vector_store_enabled`
+- `NovelGenerationState.db_manager`
+- `NovelGenerationState.vector_manager`
 
 ## 历史数据处理
 
-### 不需要迁移历史数据
+### JSON 文件（保留）
 
-Mem0 设计为"前向兼容"：
+以下文件仍然保留并正常工作：
 
-- **历史项目**：继续使用 SQLite/ChromaDB，数据完整保留
-- **新内容**：自动写入 Mem0（同时也写入 SQLite 作为备份）
+- `world.json` - 世界观设定
+- `theme_conflict.json` - 主题冲突
+- `characters.json` - 角色配置
+- `outline.json` - 大纲
+- `chapters/chapter_XXX.json` - 章节内容
+- `chapter_memory.json` - 章节记忆
 
-### 如果确实需要迁移（可选）
+### SQLite 数据库（不再使用）
 
-虽然不推荐，但如果确实需要将历史数据导入 Mem0，可以：
-
-1. **导出 SQLite 快照**：
-   ```bash
-   uv run python scripts/export_sqlite_to_json.py --project demo_001
-   ```
-
-2. **手动转换为 Mem0 格式**：
-   ```python
-   from novelgen.runtime.mem0_manager import Mem0Manager
-   from novelgen.models import Mem0Config
-   
-   # 初始化 Mem0
-   config = Mem0Config(enabled=True, chroma_path="projects/demo_001/data/vectors")
-   manager = Mem0Manager(config=config, project_id="demo_001")
-   
-   # 逐条添加历史数据
-   for entity_snapshot in historical_data:
-       manager.add_entity_state(
-           entity_id=entity_snapshot['entity_id'],
-           entity_type=entity_snapshot['entity_type'],
-           state_description=entity_snapshot['state_data'],
-           chapter_index=entity_snapshot['chapter_index'],
-       )
-   ```
-
-## 回滚策略
-
-如果 Mem0 出现问题，可以快速回滚：
-
-### 1. 禁用 Mem0
-
-在 `.env` 中：
+项目目录下的 `data/novel.db` 文件不再被使用。如果需要，可以手动删除：
 
 ```bash
-MEM0_ENABLED=false
+rm projects/demo_001/data/novel.db
 ```
 
-### 2. 系统自动降级
+### ChromaDB 数据（继续使用）
 
-- 所有查询回退到 SQLite
-- 所有数据继续正常保存
-- **无数据丢失**
-
-### 3. 清理 Mem0 数据（可选）
-
-如果需要完全移除 Mem0 数据：
-
-```bash
-# 清理指定项目的 Mem0 记忆
-uv run python scripts/clear_mem0_memory.py --project demo_001
-
-# 或手动删除 ChromaDB collection
-rm -rf projects/demo_001/data/vectors/chroma.sqlite3
-```
-
-## 数据一致性保证
-
-### 双写策略
-
-Mem0 启用时，系统采用"双写"策略：
-
-```
-新内容生成
-  ├─> 写入 Mem0（智能记忆）
-  └─> 写入 SQLite（降级备份）
-```
-
-### 查询优先级
-
-```
-场景生成前
-  ├─> 优先从 Mem0 检索（智能合并的状态）
-  ├─> 如果失败，降级到 SQLite
-  └─> 如果都失败，使用空上下文
-```
-
-## 性能影响
-
-### 延迟
-
-- Mem0 查询：+100-500ms（异步，不阻塞主流程）
-- SQLite 查询：+10-50ms
-- 总体影响：<5%
-
-### 存储空间
-
-- Mem0 使用 ChromaDB 存储，额外空间需求：+10-20% (vs 纯 SQLite)
-- 但数据更加结构化，检索效率更高
-
-### 网络开销
-
-- Mem0 需要调用 OpenAI Embedding API
-- 平均每次查询：2-5 个 API 调用
-- 成本：约 $0.0001/次 (text-embedding-3-small)
+Mem0 会继续使用 `data/vectors` 目录存储向量数据，但使用不同的 collection。
 
 ## 常见问题
 
-### Q: 迁移会丢失数据吗？
+### Q: 旧项目还能运行吗？
 
-A: **不会**。Mem0 采用"增强"策略，所有数据继续保存到 SQLite。
+A: 能，但需要启用 Mem0。JSON 文件仍然正常工作，SQLite 数据不再被读取。
 
-### Q: 如果 Mem0 失败，系统还能工作吗？
+### Q: 如何迁移旧项目的 SQLite 数据？
 
-A: **能**。系统会自动降级到 SQLite，不影响主流程。
+A: 不需要迁移。Mem0 会在运行时自动初始化角色状态。如果需要历史状态，可以手动从 SQLite 导出并调用 `mem0_manager.add_entity_state()` 导入。
 
-### Q: 可以只在部分项目启用 Mem0 吗？
+### Q: 为什么移除了降级模式？
 
-A: **暂不支持**。`MEM0_ENABLED` 是全局配置。如果需要按项目启用，可以修改 `ProjectConfig.__init__` 逻辑。
+A: 简化架构，减少维护复杂性。Mem0 是成熟的记忆层，不需要额外的降级机制。
 
-### Q: Mem0 和 SQLite 数据不同步怎么办？
+### Q: 如果 Mem0 初始化失败怎么办？
 
-A: Mem0 作为主查询源，SQLite 作为降级备份。如果发现不同步，可以：
-1. 清空 Mem0 数据，重新生成
-2. 使用 `scripts/sync_mem0_to_sqlite.py`（待实现）
+A: 程序会抛出 `Mem0InitializationError` 异常并退出。检查：
+1. `MEM0_ENABLED=true` 是否设置
+2. `OPENAI_API_KEY` 是否有效
+3. 网络连接是否正常
 
 ## 相关文档
 
 - [Mem0 设置指南](./mem0-setup.md)
 - [OpenSpec 提案](../openspec/changes/add-mem0-integration/proposal.md)
-- [配置示例](../openspec/changes/add-mem0-integration/CONFIG_EXAMPLE.md)
 
 ## 反馈与支持
 
@@ -226,4 +242,3 @@ A: Mem0 作为主查询源，SQLite 作为降级备份。如果发现不同步�
 1. 查看日志输出（搜索 "Mem0" 关键词）
 2. 运行健康检查脚本
 3. 提交 Issue 描述问题
-

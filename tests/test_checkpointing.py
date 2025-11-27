@@ -18,8 +18,8 @@ def test_checkpoint_creation():
     
     test_dir = tempfile.mkdtemp()
     try:
-        # 创建工作流
-        workflow = create_novel_generation_workflow()
+        # 创建工作流（使用 SQLite 持久化）
+        workflow = create_novel_generation_workflow(project_dir=test_dir)
         
         # 创建初始状态
         state = NovelGenerationState(
@@ -27,7 +27,8 @@ def test_checkpoint_creation():
             project_dir=test_dir,
             settings=Settings(
                 project_name='test_checkpoint',
-                author='Test Author'
+                author='Test Author',
+                world_description='测试世界描述'
             )
         )
         
@@ -69,8 +70,8 @@ def test_workflow_resume_from_checkpoint():
     
     test_dir = tempfile.mkdtemp()
     try:
-        # 创建工作流
-        workflow = create_novel_generation_workflow()
+        # 创建工作流（使用 SQLite 持久化）
+        workflow = create_novel_generation_workflow(project_dir=test_dir)
         
         # 创建初始状态
         state = NovelGenerationState(
@@ -78,7 +79,8 @@ def test_workflow_resume_from_checkpoint():
             project_dir=test_dir,
             settings=Settings(
                 project_name='test_resume',
-                author='Test Author'
+                author='Test Author',
+                world_description='测试世界描述'
             )
         )
         
@@ -125,8 +127,8 @@ def test_checkpoint_state_preservation():
     
     test_dir = tempfile.mkdtemp()
     try:
-        # 创建工作流
-        workflow = create_novel_generation_workflow()
+        # 创建工作流（使用 SQLite 持久化）
+        workflow = create_novel_generation_workflow(project_dir=test_dir)
         
         # 创建带自定义数据的状态
         state = NovelGenerationState(
@@ -134,7 +136,8 @@ def test_checkpoint_state_preservation():
             project_dir=test_dir,
             settings=Settings(
                 project_name='test_preserve',
-                author='Test Author'
+                author='Test Author',
+                world_description='测试世界描述'
             ),
             world=WorldSetting(
                 world_name='保存测试世界',
@@ -184,20 +187,20 @@ def test_multiple_checkpoint_threads():
     
     test_dir = tempfile.mkdtemp()
     try:
-        # 创建工作流
-        workflow = create_novel_generation_workflow()
+        # 创建工作流（使用 SQLite 持久化）
+        workflow = create_novel_generation_workflow(project_dir=test_dir)
         
         # 创建两个不同的项目状态
         state1 = NovelGenerationState(
             project_name='project1',
             project_dir=os.path.join(test_dir, 'project1'),
-            settings=Settings(project_name='project1', author='Author 1')
+            settings=Settings(project_name='project1', author='Author 1', world_description='测试世界1')
         )
         
         state2 = NovelGenerationState(
             project_name='project2',
             project_dir=os.path.join(test_dir, 'project2'),
-            settings=Settings(project_name='project2', author='Author 2')
+            settings=Settings(project_name='project2', author='Author 2', world_description='测试世界2')
         )
         
         # 为两个项目创建独立的检查点线程
@@ -235,13 +238,13 @@ def test_checkpoint_time_travel():
     
     test_dir = tempfile.mkdtemp()
     try:
-        # 创建工作流
-        workflow = create_novel_generation_workflow()
+        # 创建工作流（使用 SQLite 持久化）
+        workflow = create_novel_generation_workflow(project_dir=test_dir)
         
         state = NovelGenerationState(
             project_name='test_timetravel',
             project_dir=test_dir,
-            settings=Settings(project_name='test_timetravel', author='Test')
+            settings=Settings(project_name='test_timetravel', author='Test', world_description='测试世界描述')
         )
         
         config = {"configurable": {"thread_id": "test_timetravel"}}

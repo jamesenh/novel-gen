@@ -1,12 +1,14 @@
 """
 记忆上下文检索链
 根据场景计划智能检索相关的历史记忆和实体状态
+
+更新: 2025-11-25 - 简化为使用 Mem0Manager 作为唯一记忆源
 """
 import json
 import logging
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, TYPE_CHECKING
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
@@ -21,14 +23,10 @@ from novelgen.models import (
 )
 from novelgen.config import LLMConfig
 from novelgen.llm import get_llm
-from novelgen.runtime.db import DatabaseManager
-from novelgen.runtime.vector_store import VectorStoreManager
-from novelgen.runtime.memory_tools import (
-    search_story_memory_tool,
-    get_entity_states_for_characters,
-    get_recent_timeline_tool,
-)
 from novelgen.chains.output_fixing import LLMJsonRepairOutputParser
+
+if TYPE_CHECKING:
+    from novelgen.runtime.mem0_manager import Mem0Manager
 
 
 logger = logging.getLogger(__name__)
@@ -104,13 +102,12 @@ def retrieve_scene_memory_context(
     project_id: str,
     chapter_index: int,
     scene_index: int,
-    db_manager: DatabaseManager,
-    vector_manager: VectorStoreManager,
+    mem0_manager: "Mem0Manager",
     llm_config: Optional[LLMConfig] = None,
     output_dir: Optional[str] = None
 ) -> SceneMemoryContext:
     """
-    检索场景的记忆上下文
+    检索场景的记忆上下文（使用 Mem0Manager）
     
     Args:
         scene_plan: 场景计划
@@ -118,8 +115,7 @@ def retrieve_scene_memory_context(
         project_id: 项目ID
         chapter_index: 章节索引
         scene_index: 场景索引
-        db_manager: 数据库管理器
-        vector_manager: 向量存储管理器
+        mem0_manager: Mem0 管理器
         llm_config: LLM配置，可选
         output_dir: 输出目录，如果提供则将结果写入JSON文件
         
@@ -155,25 +151,25 @@ def retrieve_scene_memory_context(
             }
         )
 
-        # 从结构化结果中提取搜索关键词和关键实体，保持与规范一致
+        # 从结构化结果中提取搜索关键词和关键实体
         search_queries = analysis.search_queries or [scene_plan.purpose]
         key_entities = analysis.key_entities or scene_plan.characters
         logger.info(
             f"LLM分析结果 - 搜索关键词: {search_queries}, 关键实体: {key_entities}"
         )
         
-        # 第二步：检索相关记忆
+        # 第二步：从 Mem0 检索相关记忆
         if search_queries:
             for query in search_queries:
-                chunks = search_story_memory_tool(
-                    db_manager=db_manager,
-                    vector_manager=vector_manager,
-                    project_id=project_id,
-                    query=query,
-                    entities=key_entities if key_entities else None,
-                    top_k=5  # 每个查询返回5个
-                )
-                relevant_memories.extend(chunks)
+                try:
+                    chunks = mem0_manager.search_memory_with_filters(
+                        query=query,
+                        entities=key_entities if key_entities else None,
+                        limit=5
+                    )
+                    relevant_memories.extend(chunks)
+                except Exception as search_exc:
+                    logger.warning(f"搜索记忆失败: {search_exc}")
             
             # 去重（基于chunk_id）
             seen_ids = set()
@@ -185,33 +181,35 @@ def retrieve_scene_memory_context(
             relevant_memories = unique_memories[:10]  # 最多保留10个
             logger.info(f"检索到 {len(relevant_memories)} 个相关记忆块")
         
-        # 第三步：获取角色状态
+        # 第三步：从 Mem0 获取角色状态
         if scene_plan.characters:
-            entity_states = get_entity_states_for_characters(
-                db_manager=db_manager,
-                project_id=project_id,
-                character_names=scene_plan.characters,
-                chapter_index=chapter_index,
-                scene_index=scene_index
-            )
-            logger.info(f"获取到 {len(entity_states)} 个角色状态")
+            try:
+                entity_states = mem0_manager.get_entity_states_for_characters(
+                    character_names=scene_plan.characters,
+                    chapter_index=chapter_index,
+                    scene_index=scene_index
+                )
+                logger.info(f"获取到 {len(entity_states)} 个角色状态")
+            except Exception as state_exc:
+                logger.warning(f"获取角色状态失败: {state_exc}")
         
-        # 第四步：获取时间线上下文（可选）
-        timeline_snapshots = get_recent_timeline_tool(
-            db_manager=db_manager,
-            project_id=project_id,
-            chapter_index=chapter_index,
-            context_window=1,
-            scene_index=scene_index
-        )
-        if timeline_snapshots:
-            # 聚合时间线信息
-            timeline_context = {
-                "total_snapshots": len(timeline_snapshots),
-                "entities_tracked": len(set(s.entity_id for s in timeline_snapshots)),
-                "chapter_range": f"{chapter_index-1} to {chapter_index+1}"
-            }
-            logger.info(f"获取到时间线上下文: {timeline_context}")
+        # 第四步：构建时间线上下文（从 Mem0 检索近期记忆）
+        try:
+            # 搜索当前章节的场景内容作为时间线上下文
+            timeline_memories = mem0_manager.search_scene_content(
+                query=f"第{chapter_index}章的场景内容",
+                chapter_index=chapter_index,
+                limit=5
+            )
+            if timeline_memories:
+                timeline_context = {
+                    "total_memories": len(timeline_memories),
+                    "chapter_index": chapter_index,
+                    "recent_scenes": [m.content[:100] for m in timeline_memories[:3]]
+                }
+                logger.info(f"获取到时间线上下文: {len(timeline_memories)} 条记忆")
+        except Exception as timeline_exc:
+            logger.warning(f"获取时间线上下文失败: {timeline_exc}")
         
     except Exception as e:
         logger.warning(f"记忆检索过程出现错误，但将继续执行: {e}")

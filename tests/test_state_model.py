@@ -33,7 +33,8 @@ def test_state_initialization_with_data():
     """测试带完整数据的状态初始化"""
     settings = Settings(
         project_name='test_project',
-        author='Test Author'
+        author='Test Author',
+        world_description='测试世界描述'
     )
     
     world = WorldSetting(

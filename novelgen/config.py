@@ -1,6 +1,8 @@
 """
 配置管理
 管理LLM配置、API密钥等
+
+更新: 2025-11-25 - 简化配置，移除独立的 SQLite 和 VectorStore 相关配置
 """
 import os
 from typing import Optional, Dict, Literal, TYPE_CHECKING
@@ -34,10 +36,17 @@ class EmbeddingConfig(BaseModel):
         
         # 从环境变量读取配置（环境变量优先级高于传入参数）
         # 如果参数未提供，尝试从环境变量读取
+        # 注意：OPENAI_API_BASE 已废弃，请使用 OPENAI_BASE_URL 或 EMBEDDING_BASE_URL
         if self.api_key is None:
             self.api_key = os.getenv("EMBEDDING_API_KEY") or os.getenv("OPENAI_API_KEY")
         if self.base_url is None:
-            self.base_url = os.getenv("EMBEDDING_BASE_URL") or os.getenv("OPENAI_API_BASE")
+            self.base_url = os.getenv("EMBEDDING_BASE_URL") or os.getenv("OPENAI_BASE_URL")
+
+        # 兼容已废弃的 OPENAI_API_BASE（显示警告）
+        if self.base_url is None and os.getenv("OPENAI_API_BASE"):
+            import warnings
+            warnings.warn("OPENAI_API_BASE 已废弃，请使用 OPENAI_BASE_URL 或 EMBEDDING_BASE_URL")
+            self.base_url = os.getenv("OPENAI_API_BASE")
         
         # model_name 特殊处理：优先使用环境变量，如果都没有则使用默认值
         env_model = os.getenv("EMBEDDING_MODEL_NAME")
@@ -155,8 +164,8 @@ class ProjectConfig(BaseModel):
     """项目配置
 
     注意：
-    - 持久化相关行为可以通过 ProjectConfig 字段或环境变量控制；
-    - 默认情况下会启用数据持久化和向量存储，并将数据写入 project_dir/data 下。
+    - 使用 Mem0 作为唯一的记忆层，必须启用 Mem0（设置 MEM0_ENABLED=true）
+    - Mem0 内部使用 ChromaDB 存储向量，路径由 vector_store_dir 配置
     """
 
     project_dir: str = Field(description="项目目录")
@@ -166,21 +175,9 @@ class ProjectConfig(BaseModel):
         default="none",
         description="章节修订策略：none(不修订), auto_apply(自动应用), manual_confirm(人工确认)"
     )
-    persistence_enabled: bool = Field(
-        default=True,
-        description="是否启用数据持久化。可通过环境变量 NOVELGEN_PERSISTENCE_ENABLED 控制。",
-    )
-    vector_store_enabled: bool = Field(
-        default=True,
-        description="是否启用向量存储。可通过环境变量 NOVELGEN_VECTOR_STORE_ENABLED 控制。",
-    )
-    db_path: Optional[str] = Field(
-        default=None,
-        description="数据库文件路径，可以是绝对路径或相对于 project_dir 的相对路径；默认使用 project_dir/data/novel.db。",
-    )
     vector_store_dir: Optional[str] = Field(
         default=None,
-        description="向量存储持久化目录，可以是绝对路径或相对于 project_dir 的相对路径；默认使用 project_dir/data/vectors。",
+        description="Mem0 内部 ChromaDB 存储目录，默认使用 project_dir/data/vectors。",
     )
 
     def __init__(self, **data):
@@ -190,21 +187,7 @@ class ProjectConfig(BaseModel):
             if env_policy in ("none", "auto_apply", "manual_confirm"):
                 data["revision_policy"] = env_policy
 
-        # 从环境变量读取持久化开关（如果未在参数中提供）
-        if "persistence_enabled" not in data:
-            env_persistence = os.getenv("NOVELGEN_PERSISTENCE_ENABLED", "true")
-            data["persistence_enabled"] = env_persistence.lower() in ("true", "1", "yes", "on")
-
-        if "vector_store_enabled" not in data:
-            env_vector = os.getenv("NOVELGEN_VECTOR_STORE_ENABLED", "true")
-            data["vector_store_enabled"] = env_vector.lower() in ("true", "1", "yes", "on")
-
-        # 从环境变量读取数据库路径和向量存储目录（如果未在参数中提供）
-        if "db_path" not in data:
-            env_db_path = os.getenv("NOVELGEN_DB_PATH")
-            if env_db_path:
-                data["db_path"] = env_db_path
-
+        # 从环境变量读取向量存储目录（如果未在参数中提供）
         if "vector_store_dir" not in data:
             env_vector_dir = os.getenv("NOVELGEN_VECTOR_STORE_DIR")
             if env_vector_dir:
@@ -219,7 +202,7 @@ class ProjectConfig(BaseModel):
                 from novelgen.models import Mem0Config
                 self.mem0_config = Mem0Config(
                     enabled=True,
-                    chroma_path=self.get_vector_store_dir(),  # 复用现有向量存储路径
+                    chroma_path=self.get_vector_store_dir(),
                     api_key=os.getenv("MEM0_API_KEY"),
                 )
 
@@ -270,7 +253,7 @@ class ProjectConfig(BaseModel):
     )
     mem0_config: Optional["Mem0Config"] = Field(
         default=None,
-        description="Mem0 配置（可选）"
+        description="Mem0 配置（必需，设置 MEM0_ENABLED=true 启用）"
     )
 
     @property
@@ -301,19 +284,11 @@ class ProjectConfig(BaseModel):
     def consistency_report_file(self) -> str:
         return os.path.join(self.project_dir, "consistency_reports.json")
 
-    def get_db_path(self) -> str:
-        """获取数据库文件路径，如果未设置则返回默认路径"""
-        if self.db_path:
-            # 如果是绝对路径，直接返回
-            if os.path.isabs(self.db_path):
-                return self.db_path
-            # 如果是相对路径，相对于 project_dir
-            return os.path.join(self.project_dir, self.db_path)
-        # 默认使用 project_dir/data/novel.db
-        return os.path.join(self.project_dir, "data", "novel.db")
-
     def get_vector_store_dir(self) -> str:
-        """获取向量存储目录路径，如果未设置则返回默认路径"""
+        """获取向量存储目录路径（用于 Mem0 内部 ChromaDB）
+        
+        如果未设置则返回默认路径 project_dir/data/vectors
+        """
         if self.vector_store_dir:
             # 如果是绝对路径，直接返回
             if os.path.isabs(self.vector_store_dir):
