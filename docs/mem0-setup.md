@@ -37,13 +37,28 @@ Mem0 是本项目的唯一记忆存储层，提供：
 # 启用 Mem0（必需）
 MEM0_ENABLED=true
 
-# OpenAI API Key（必需，用于 Embedding）
+# OpenAI API Key（必需，用于 Embedding 和 LLM）
 OPENAI_API_KEY=your_openai_api_key_here
+
+# 可选：自定义 API 端点（用于第三方 OpenAI 兼容服务）
+# OPENAI_BASE_URL=https://your-api-endpoint.com/v1
+
+# 可选：自定义 LLM 模型（用于项目各个 chain）
+# OPENAI_MODEL_NAME=gpt-4o-mini
 
 # 可选：自定义 Embedding 模型
 # EMBEDDING_MODEL_NAME=text-embedding-3-small
-# EMBEDDING_API_KEY=your_key  # 如果与 OPENAI_API_KEY 不同
+
+# 可选：自定义 Mem0 LLM（用于记忆处理）
+# 如果不设置，默认使用 OPENAI_MODEL_NAME 的值
+# MEM0_LLM_MODEL_NAME=gpt-4o-mini
 ```
+
+> **⚠️ 重要提示**：Mem0 内部使用两个模型：
+> - **Embedder**：用于生成向量嵌入（由 `EMBEDDING_MODEL_NAME` 控制）
+> - **LLM**：用于记忆处理（由 `MEM0_LLM_MODEL_NAME` 或 `OPENAI_MODEL_NAME` 控制）
+>
+> 如果不配置 LLM，Mem0 将使用其默认模型 `gpt-4.1-nano-2025-04-14`。
 
 ### 2. 运行项目
 
@@ -68,12 +83,32 @@ python main.py
 
 ### 环境变量
 
+**基础配置**：
+
 | 变量名 | 描述 | 默认值 | 必需 |
 |--------|------|--------|------|
 | `MEM0_ENABLED` | 是否启用 Mem0 | `false` | **是** |
-| `OPENAI_API_KEY` | OpenAI API Key（用于 Embedding） | - | **是** |
-| `EMBEDDING_MODEL_NAME` | Embedding 模型名称 | `text-embedding-3-small` | 否 |
-| `EMBEDDING_BASE_URL` | 自定义 API 端点 | - | 否 |
+| `OPENAI_API_KEY` | OpenAI API Key（用于 Embedding 和 LLM） | - | **是** |
+| `OPENAI_BASE_URL` | 自定义 API 端点 | - | 否 |
+| `OPENAI_MODEL_NAME` | 默认 LLM 模型名称 | - | 否 |
+
+**Embedding 配置**（可选覆盖）：
+
+| 变量名 | 描述 | 默认值 |
+|--------|------|--------|
+| `EMBEDDING_MODEL_NAME` | Embedding 模型名称 | `text-embedding-3-small` |
+| `EMBEDDING_API_KEY` | Embedding API Key | 使用 `OPENAI_API_KEY` |
+| `EMBEDDING_BASE_URL` | 自定义 Embedding API 端点 | 使用 `OPENAI_BASE_URL` |
+
+**Mem0 LLM 配置**（用于记忆处理）：
+
+> **重要**：Mem0 内部使用 LLM 来处理记忆（提取事实、合并、去重等）。如果不配置，将使用 Mem0 的默认模型 `gpt-4.1-nano-2025-04-14`。
+
+| 变量名 | 描述 | 默认值 |
+|--------|------|--------|
+| `MEM0_LLM_MODEL_NAME` | Mem0 LLM 模型名称 | 使用 `OPENAI_MODEL_NAME` |
+| `MEM0_LLM_API_KEY` | Mem0 LLM API Key | 使用 `OPENAI_API_KEY` |
+| `MEM0_LLM_BASE_URL` | Mem0 LLM API 端点 | 使用 `OPENAI_BASE_URL` |
 
 ### 高级配置
 
@@ -91,6 +126,12 @@ config.mem0_config = Mem0Config(
     collection_name="custom_mem0_memories",      # 自定义 collection 名称
     embedding_model_dims=1536,                   # Embedding 维度
     timeout=10,                                  # 查询超时（秒）
+    # LLM 配置（用于记忆处理）
+    llm_model_name="gpt-4o-mini",               # Mem0 LLM 模型
+    llm_api_key="your_api_key",                 # LLM API Key
+    llm_base_url="https://api.openai.com/v1",   # LLM API 端点
+    llm_temperature=0.1,                         # LLM 温度（建议较低值）
+    llm_max_tokens=2000,                         # LLM 最大 token 数
 )
 ```
 

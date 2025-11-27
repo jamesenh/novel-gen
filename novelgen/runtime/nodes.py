@@ -3,16 +3,18 @@ LangGraph 节点包装器
 为现有 LangChain chains 提供 LangGraph 节点接口
 
 开发者: jamesenh, 开发时间: 2025-11-21
+更新: 2025-11-27 - 修复 Mem0 集成问题，添加记忆上下文检索功能
 """
 import os
 import json
 from typing import Dict, Any, Optional
 from pathlib import Path
+from datetime import datetime
 
 from novelgen.models import (
     NovelGenerationState, Settings, WorldSetting, ThemeConflict,
     CharactersConfig, Outline, ChapterPlan, GeneratedChapter,
-    ChapterMemoryEntry, ConsistencyReport
+    ChapterMemoryEntry, ConsistencyReport, SceneMemoryContext
 )
 from novelgen.chains.world_chain import generate_world
 from novelgen.chains.theme_conflict_chain import generate_theme_conflict
@@ -205,24 +207,59 @@ def outline_creation_node(state: NovelGenerationState) -> Dict[str, Any]:
 def init_chapter_loop_node(state: NovelGenerationState) -> Dict[str, Any]:
     """
     初始化章节循环节点
-    
-    设置 current_chapter_number 为第一章，准备开始逐章生成
+
+    设置 current_chapter_number 为第一个未完成的章节，支持断点续跑。
+    如果所有章节都已完成，则设置为最后一章+1（将触发结束条件）。
+
+    更新: 2025-11-27 - 修改为找到第一个未完成的章节，而不是总是从第1章开始
     """
     try:
         if not state.chapters_plan:
             raise ValueError("chapters_plan 为空，无法初始化章节循环")
-        
-        # 找到第一个章节编号（通常是1，但为了健壮性，使用最小值）
-        first_chapter_number = min(state.chapters_plan.keys())
-        
-        print(f"🔄 初始化章节循环，从第 {first_chapter_number} 章开始")
-        
-        return {
-            "current_chapter_number": first_chapter_number,
-            "current_step": "init_chapter_loop",
-            "completed_steps": state.completed_steps + ["init_chapter_loop"]
-        }
-    
+
+        # 获取所有计划中的章节编号（按顺序）
+        planned_chapters = sorted(state.chapters_plan.keys())
+
+        # 找到第一个未完成的章节
+        # 章节已完成的标准：存在于 state.chapters 中且有实际内容
+        first_incomplete_chapter = None
+        completed_count = 0
+
+        for chapter_num in planned_chapters:
+            if chapter_num in state.chapters:
+                chapter = state.chapters[chapter_num]
+                # 检查章节是否有实际内容
+                if chapter.scenes and len(chapter.scenes) > 0:
+                    completed_count += 1
+                    continue
+            # 找到第一个未完成的章节
+            first_incomplete_chapter = chapter_num
+            break
+
+        if first_incomplete_chapter is not None:
+            # 有未完成的章节，从该章节开始
+            if completed_count > 0:
+                print(f"🔄 检测到已完成 {completed_count} 章，从第 {first_incomplete_chapter} 章继续")
+            else:
+                print(f"🔄 初始化章节循环，从第 {first_incomplete_chapter} 章开始")
+
+            return {
+                "current_chapter_number": first_incomplete_chapter,
+                "current_step": "init_chapter_loop",
+                "completed_steps": state.completed_steps + ["init_chapter_loop"]
+            }
+        else:
+            # 所有章节都已完成
+            last_chapter = max(planned_chapters)
+            print(f"✅ 所有 {len(planned_chapters)} 章都已完成，无需生成")
+
+            # 设置为最后一章，让后续的条件边能正确处理
+            return {
+                "current_chapter_number": last_chapter,
+                "current_step": "init_chapter_loop",
+                "completed_steps": state.completed_steps + ["init_chapter_loop"]
+            }
+
     except Exception as e:
         return {
             "current_step": "init_chapter_loop",
@@ -315,33 +352,151 @@ def chapter_planning_node(state: NovelGenerationState) -> Dict[str, Any]:
         }
 
 
+def _get_mem0_manager(project_dir: str, project_name: str):
+    """
+    获取 Mem0Manager 实例
+
+    由于 LangGraph 状态无法序列化 Mem0Manager，需要在节点中动态创建
+
+    Args:
+        project_dir: 项目目录
+        project_name: 项目名称
+
+    Returns:
+        Mem0Manager 实例，如果初始化失败则返回 None
+    """
+    try:
+        from novelgen.config import ProjectConfig
+        from novelgen.runtime.mem0_manager import Mem0Manager, Mem0InitializationError
+
+        config = ProjectConfig(project_dir=project_dir)
+        if config.mem0_config and config.mem0_config.enabled:
+            return Mem0Manager(
+                config=config.mem0_config,
+                project_id=project_name,
+                embedding_config=config.embedding_config
+            )
+    except Exception as e:
+        print(f"⚠️ Mem0Manager 初始化失败: {e}")
+    return None
+
+
+def _retrieve_scene_memory_context(
+    mem0_manager,
+    scene_plan,
+    chapter_number: int,
+    project_name: str
+) -> Optional[SceneMemoryContext]:
+    """
+    从 Mem0 检索场景记忆上下文
+
+    Args:
+        mem0_manager: Mem0Manager 实例
+        scene_plan: 场景计划
+        chapter_number: 章节编号
+        project_name: 项目名称
+
+    Returns:
+        SceneMemoryContext 对象，如果检索失败则返回 None
+    """
+    if mem0_manager is None:
+        return None
+
+    try:
+        # 从 Mem0 检索角色状态
+        entity_states = []
+        if scene_plan.characters:
+            entity_states = mem0_manager.get_entity_states_for_characters(
+                character_names=scene_plan.characters,
+                chapter_index=chapter_number,
+                scene_index=scene_plan.scene_number
+            )
+            if entity_states:
+                print(f"    ✅ 已从 Mem0 检索到 {len(entity_states)} 个角色状态")
+
+        # 从 Mem0 检索相关场景内容
+        relevant_memories = []
+        try:
+            # 使用场景目的作为查询
+            relevant_memories = mem0_manager.search_scene_content(
+                query=scene_plan.purpose,
+                chapter_index=None,  # 搜索所有章节
+                limit=5
+            )
+            if relevant_memories:
+                print(f"    ✅ 已从 Mem0 检索到 {len(relevant_memories)} 个相关记忆")
+        except Exception as search_exc:
+            print(f"    ⚠️ Mem0 场景内容搜索失败: {search_exc}")
+
+        # 构建场景记忆上下文
+        return SceneMemoryContext(
+            project_id=project_name,
+            chapter_index=chapter_number,
+            scene_index=scene_plan.scene_number,
+            entity_states=entity_states,
+            relevant_memories=relevant_memories,
+            timeline_context=None,
+            retrieval_timestamp=datetime.now()
+        )
+    except Exception as exc:
+        print(f"    ⚠️ 场景记忆上下文生成失败: {exc}")
+        return None
+
+
+def _save_scene_to_mem0(mem0_manager, content: str, chapter_number: int, scene_number: int):
+    """
+    保存场景内容到 Mem0
+
+    Args:
+        mem0_manager: Mem0Manager 实例
+        content: 场景文本内容
+        chapter_number: 章节编号
+        scene_number: 场景编号
+    """
+    if mem0_manager is None:
+        return
+
+    try:
+        chunks = mem0_manager.add_scene_content(
+            content=content,
+            chapter_index=chapter_number,
+            scene_index=scene_number,
+            content_type="scene"
+        )
+        if chunks:
+            print(f"    💾 已将场景{scene_number}内容保存到 Mem0（{len(chunks)}个块）")
+    except Exception as e:
+        print(f"    ⚠️ 保存场景内容到 Mem0 失败: {e}")
+
+
 def chapter_generation_node(state: NovelGenerationState) -> Dict[str, Any]:
     """
     章节文本生成节点（单章生成模式）
-    
+
     根据 state.current_chapter_number 生成指定章节的场景文本
+    支持从 Mem0 检索记忆上下文以提升生成一致性
     """
     try:
         if not state.chapters_plan:
             raise ValueError("chapters_plan 为空，无法生成章节文本")
-        
+
         # 确定当前章节编号
         chapter_number = state.current_chapter_number
         if chapter_number is None:
             raise ValueError("current_chapter_number 未设置，无法生成章节")
-        
+
         # 检查章节计划是否存在
         if chapter_number not in state.chapters_plan:
             raise ValueError(f"章节 {chapter_number} 的计划不存在")
-        
+
         plan = state.chapters_plan[chapter_number]
         chapters = dict(state.chapters)  # 复制现有章节
-        
+
         # 检查是否已存在章节（避免重复生成）
         chapters_dir = os.path.join(state.project_dir, "chapters")
         os.makedirs(chapters_dir, exist_ok=True)
         chapter_path = os.path.join(chapters_dir, f"chapter_{chapter_number:03d}.json")
-        
+
         if os.path.exists(chapter_path) and chapter_number not in chapters:
             # 加载已有章节
             with open(chapter_path, 'r', encoding='utf-8') as f:
@@ -351,39 +506,75 @@ def chapter_generation_node(state: NovelGenerationState) -> Dict[str, Any]:
         elif chapter_number not in chapters:
             # 生成新章节
             print(f"📝 正在生成第 {chapter_number} 章：{plan.chapter_title}")
+
+            # 初始化 Mem0Manager（用于记忆检索和存储）
+            mem0_manager = _get_mem0_manager(state.project_dir, state.project_name)
+            if mem0_manager:
+                print(f"    🧠 已初始化 Mem0 记忆检索")
+            else:
+                print(f"    ⚠️ Mem0 未启用，将不使用记忆上下文")
+
             generated_scenes = []
+            previous_summary = ""
+
             for scene_plan in plan.scenes:
+                print(f"    生成场景 {scene_plan.scene_number}...")
+
+                # 从 Mem0 检索记忆上下文
+                scene_memory_context = _retrieve_scene_memory_context(
+                    mem0_manager=mem0_manager,
+                    scene_plan=scene_plan,
+                    chapter_number=chapter_number,
+                    project_name=state.project_name
+                )
+
+                # 生成场景文本
                 scene = generate_scene_text(
                     scene_plan=scene_plan,
                     world_setting=state.world,
                     characters=state.characters,
-                    previous_summary="",
+                    previous_summary=previous_summary,
                     chapter_context="",
-                    scene_memory_context=None,
+                    scene_memory_context=scene_memory_context,
                     verbose=False
                 )
                 generated_scenes.append(scene)
-            
+
+                # 保存场景内容到 Mem0（供后续场景检索）
+                _save_scene_to_mem0(
+                    mem0_manager=mem0_manager,
+                    content=scene.content,
+                    chapter_number=chapter_number,
+                    scene_number=scene.scene_number
+                )
+
+                # 更新前文摘要（简单版本，使用场景概要）
+                if hasattr(scene_plan, 'summary') and scene_plan.summary:
+                    previous_summary = scene_plan.summary
+                elif hasattr(scene, 'content') and scene.content:
+                    # 截取内容前200字作为摘要
+                    previous_summary = scene.content[:200] + "..."
+
             chapter = GeneratedChapter(
                 chapter_number=chapter_number,
                 chapter_title=plan.chapter_title,
                 scenes=generated_scenes,
                 total_words=sum(s.word_count for s in generated_scenes)
             )
-            
+
             # 保存章节
             with open(chapter_path, 'w', encoding='utf-8') as f:
                 json.dump(chapter.model_dump(), f, ensure_ascii=False, indent=2)
-            
+
             chapters[chapter_number] = chapter
             print(f"✅ 第 {chapter_number} 章生成完成，共 {chapter.total_words} 字")
-        
+
         return {
             "chapters": chapters,
             "current_step": "chapter_generation",
             "completed_steps": state.completed_steps + [f"chapter_generation_{chapter_number}"]
         }
-    
+
     except Exception as e:
         return {
             "current_step": "chapter_generation",

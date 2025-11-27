@@ -200,10 +200,25 @@ class ProjectConfig(BaseModel):
             mem0_enabled = os.getenv("MEM0_ENABLED", "false").lower() in ("true", "1", "yes", "on")
             if mem0_enabled:
                 from novelgen.models import Mem0Config
+
+                # 读取重试相关的环境变量
+                request_timeout = int(os.getenv("MEM0_REQUEST_TIMEOUT", "30"))
+                max_retries = int(os.getenv("MEM0_MAX_RETRIES", "3"))
+                retry_backoff_factor = float(os.getenv("MEM0_RETRY_BACKOFF_FACTOR", "2.0"))
+
                 self.mem0_config = Mem0Config(
                     enabled=True,
                     chroma_path=self.get_vector_store_dir(),
                     api_key=os.getenv("MEM0_API_KEY"),
+                    # Mem0 LLM 配置（用于记忆处理）
+                    # 优先使用 MEM0_LLM_* 环境变量，否则使用通用配置
+                    llm_model_name=os.getenv("MEM0_LLM_MODEL_NAME") or os.getenv("OPENAI_MODEL_NAME"),
+                    llm_api_key=os.getenv("MEM0_LLM_API_KEY") or os.getenv("OPENAI_API_KEY"),
+                    llm_base_url=os.getenv("MEM0_LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL") or os.getenv("OPENAI_API_BASE"),
+                    # 重试配置
+                    request_timeout=request_timeout,
+                    max_retries=max_retries,
+                    retry_backoff_factor=retry_backoff_factor,
                 )
 
     # 各个链的配置，设置不同的chain_name

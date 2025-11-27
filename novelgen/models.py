@@ -220,7 +220,14 @@ class MemoryRetrievalAnalysis(BaseModel):
 # Mem0 配置与数据模型
 
 class Mem0Config(BaseModel):
-    """Mem0 配置"""
+    """Mem0 配置
+    
+    注意：Mem0 内部使用两个模型：
+    1. LLM：用于记忆处理（提取事实、合并、去重等）
+    2. Embedder：用于生成向量嵌入进行语义搜索
+    
+    如果不配置 LLM，Mem0 会使用默认模型（gpt-4.1-nano-2025-04-14）
+    """
     enabled: bool = Field(default=False, description="是否启用 Mem0")
     vector_store_provider: str = Field(default="chroma", description="向量存储提供商（当前仅支持 chroma）")
     chroma_path: str = Field(default="data/chroma", description="ChromaDB 存储路径（复用现有路径）")
@@ -228,6 +235,16 @@ class Mem0Config(BaseModel):
     embedding_model_dims: int = Field(default=1536, description="Embedding 维度（与项目配置一致）")
     api_key: Optional[str] = Field(default=None, description="Mem0 API Key（仅云端模式需要）")
     timeout: int = Field(default=5, description="查询超时时间（秒）")
+    # LLM 配置（用于记忆处理）
+    llm_model_name: Optional[str] = Field(default=None, description="Mem0 内部使用的 LLM 模型名称")
+    llm_api_key: Optional[str] = Field(default=None, description="LLM API Key（如不设置则使用 OPENAI_API_KEY）")
+    llm_base_url: Optional[str] = Field(default=None, description="LLM API Base URL（如不设置则使用 OPENAI_BASE_URL）")
+    llm_temperature: float = Field(default=0.1, description="LLM 温度参数（记忆处理建议较低值）")
+    llm_max_tokens: int = Field(default=2000, description="LLM 最大 token 数")
+    # 重试配置（用于处理网络超时等问题）
+    request_timeout: int = Field(default=30, description="请求超时时间（秒）")
+    max_retries: int = Field(default=3, description="最大重试次数")
+    retry_backoff_factor: float = Field(default=2.0, description="重试指数退避因子")
 
 
 class UserPreference(BaseModel):

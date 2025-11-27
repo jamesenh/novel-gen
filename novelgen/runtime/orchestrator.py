@@ -487,22 +487,28 @@ class NovelOrchestrator:
             print(f"⚠️ 删除章节记忆失败: {e}")
     
     def _get_or_create_workflow_state(self) -> NovelGenerationState:
-        """获取或创建工作流状态"""
+        """获取或创建工作流状态
+
+        从项目目录加载已存在的 JSON 文件，并根据文件存在性推断 completed_steps。
+        这样在重新运行时，工作流能够正确跳过已完成的步骤。
+
+        更新: 2025-11-27 - 添加 completed_steps 推断逻辑，修复检查点恢复问题
+        """
         if self._workflow_state is None:
             # 从 JSON 文件加载现有数据
             from novelgen.models import Settings
-            
+
             # 从 settings.json 文件加载配置
             settings_file = os.path.join(self.project_dir, "settings.json")
             settings = self.load_json(settings_file, Settings)
             if settings is None:
                 raise ValueError(f"settings.json 不存在或加载失败: {settings_file}")
-            
+
             world = self.load_json(self.config.world_file, WorldSetting)
             theme_conflict = self.load_json(self.config.theme_conflict_file, ThemeConflict)
             characters = self.load_json(self.config.characters_file, CharactersConfig)
             outline = self.load_json(self.config.outline_file, Outline)
-            
+
             # 加载章节计划和生成的章节
             chapters_plan = {}
             chapters = {}
@@ -512,14 +518,29 @@ class NovelOrchestrator:
                     plan_file = os.path.join(self.config.chapters_dir, f"chapter_{num:03d}_plan.json")
                     if os.path.exists(plan_file):
                         chapters_plan[num] = self.load_json(plan_file, ChapterPlan)
-                    
+
                     chapter_file = os.path.join(self.config.chapters_dir, f"chapter_{num:03d}.json")
                     if os.path.exists(chapter_file):
                         chapters[num] = self.load_json(chapter_file, GeneratedChapter)
-            
+
             # 加载章节记忆
             chapter_memories = self._load_chapter_memory_entries()
-            
+
+            # 根据已存在的文件推断 completed_steps
+            # 这是检查点恢复的关键：确保重新运行时能正确跳过已完成的步骤
+            completed_steps = self._infer_completed_steps(
+                settings=settings,
+                world=world,
+                theme_conflict=theme_conflict,
+                characters=characters,
+                outline=outline,
+                chapters_plan=chapters_plan,
+                chapters=chapters
+            )
+
+            if completed_steps:
+                print(f"📋 检测到已完成的步骤: {', '.join(completed_steps)}")
+
             self._workflow_state = NovelGenerationState(
                 project_name=self.project_name,
                 project_dir=self.project_dir,
@@ -530,12 +551,85 @@ class NovelOrchestrator:
                 outline=outline,
                 chapters_plan=chapters_plan,
                 chapters=chapters,
-                chapter_memories=chapter_memories
+                chapter_memories=chapter_memories,
+                completed_steps=completed_steps
                 # 注意：mem0_manager 不放入状态，因为它无法被 msgpack 序列化
                 # 在 orchestrator 级别通过 self.mem0_manager 管理
             )
-        
+
         return self._workflow_state
+
+    def _infer_completed_steps(
+        self,
+        settings,
+        world,
+        theme_conflict,
+        characters,
+        outline,
+        chapters_plan: dict,
+        chapters: dict
+    ) -> list:
+        """根据已存在的数据推断 completed_steps 列表
+
+        遵循工作流的执行顺序：
+        1. load_settings
+        2. world_creation
+        3. theme_conflict_creation
+        4. character_creation
+        5. outline_creation
+        6. chapter_planning
+        7. init_chapter_loop
+        8. chapter_generation_N (每个章节)
+        9. consistency_check_N (每个章节)
+
+        Args:
+            settings: 项目配置
+            world: 世界观设定
+            theme_conflict: 主题冲突
+            characters: 角色配置
+            outline: 大纲
+            chapters_plan: 章节计划字典
+            chapters: 已生成章节字典
+
+        Returns:
+            推断出的已完成步骤列表
+        """
+        completed_steps = []
+
+        # 按照工作流顺序推断
+        if settings is not None:
+            completed_steps.append("load_settings")
+
+        if world is not None:
+            completed_steps.append("world_creation")
+
+        if theme_conflict is not None:
+            completed_steps.append("theme_conflict_creation")
+
+        if characters is not None:
+            completed_steps.append("character_creation")
+
+        if outline is not None:
+            completed_steps.append("outline_creation")
+
+        # 检查章节计划是否完整（所有章节都有计划）
+        if outline and chapters_plan:
+            expected_chapters = {ch.chapter_number for ch in outline.chapters}
+            existing_plans = set(chapters_plan.keys())
+            if expected_chapters <= existing_plans:
+                completed_steps.append("chapter_planning")
+                completed_steps.append("init_chapter_loop")
+
+        # 推断已完成的章节生成和一致性检查
+        for chapter_num in sorted(chapters.keys()):
+            chapter = chapters[chapter_num]
+            # 检查章节是否有实际内容（至少有一个场景）
+            if chapter.scenes and len(chapter.scenes) > 0:
+                completed_steps.append(f"chapter_generation_{chapter_num}")
+                # 假设生成后都做了一致性检查
+                completed_steps.append(f"consistency_check_{chapter_num}")
+
+        return completed_steps
     
     def run_workflow(self, stop_at: Optional[str] = None) -> NovelGenerationState:
         """"运行完整工作流
