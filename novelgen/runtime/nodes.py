@@ -25,6 +25,8 @@ from novelgen.chains.scene_text_chain import generate_scene_text
 from novelgen.runtime.consistency import run_consistency_check
 from novelgen.chains.chapter_revision_chain import revise_chapter
 from novelgen.runtime.memory import generate_chapter_memory_entry
+from novelgen.runtime.summary import summarize_scenes
+from typing import List
 
 
 def load_settings_node(state: NovelGenerationState) -> Dict[str, Any]:
@@ -137,6 +139,7 @@ def character_creation_node(state: NovelGenerationState) -> Dict[str, Any]:
     角色生成节点
     
     调用 generate_characters chain 生成角色配置
+    并初始化角色状态到 Mem0
     """
     try:
         if state.settings is None or state.world is None or state.theme_conflict is None:
@@ -152,6 +155,11 @@ def character_creation_node(state: NovelGenerationState) -> Dict[str, Any]:
         characters_path = os.path.join(state.project_dir, "characters.json")
         with open(characters_path, 'w', encoding='utf-8') as f:
             json.dump(characters.model_dump(), f, ensure_ascii=False, indent=2)
+        
+        # 初始化角色状态到 Mem0
+        mem0_manager = _get_mem0_manager(state.project_dir, state.project_name)
+        if mem0_manager:
+            _initialize_character_states_to_mem0(mem0_manager, characters)
         
         return {
             "characters": characters,
@@ -381,6 +389,60 @@ def _get_mem0_manager(project_dir: str, project_name: str):
     return None
 
 
+def _initialize_character_states_to_mem0(mem0_manager, characters: CharactersConfig):
+    """
+    初始化角色状态到 Mem0
+
+    为主角、反派和配角创建初始状态记录
+
+    Args:
+        mem0_manager: Mem0Manager 实例
+        characters: 角色配置
+    """
+    if mem0_manager is None:
+        return
+
+    print(f"💾 正在为角色初始化 Mem0 Agent Memory...")
+    try:
+        character_count = 0
+        
+        # 主角
+        mem0_manager.add_entity_state(
+            entity_id=characters.protagonist.name,
+            entity_type="character",
+            state_description=f"角色初始状态：{characters.protagonist.personality}。背景：{characters.protagonist.background}",
+            chapter_index=0,
+            story_timeline="故事开始",
+        )
+        character_count += 1
+        
+        # 反派
+        if characters.antagonist:
+            mem0_manager.add_entity_state(
+                entity_id=characters.antagonist.name,
+                entity_type="character",
+                state_description=f"角色初始状态：{characters.antagonist.personality}。背景：{characters.antagonist.background}",
+                chapter_index=0,
+                story_timeline="故事开始",
+            )
+            character_count += 1
+        
+        # 配角
+        for character in characters.supporting_characters:
+            mem0_manager.add_entity_state(
+                entity_id=character.name,
+                entity_type="character",
+                state_description=f"角色初始状态：{character.personality}。背景：{character.background}",
+                chapter_index=0,
+                story_timeline="故事开始",
+            )
+            character_count += 1
+        
+        print(f"✅ 已为 {character_count} 个角色初始化 Mem0 记忆")
+    except Exception as e:
+        print(f"⚠️ Mem0 角色初始化失败: {e}")
+
+
 def _retrieve_scene_memory_context(
     mem0_manager,
     scene_plan,
@@ -469,6 +531,135 @@ def _save_scene_to_mem0(mem0_manager, content: str, chapter_number: int, scene_n
         print(f"    ⚠️ 保存场景内容到 Mem0 失败: {e}")
 
 
+def _generate_and_save_chapter_memory(
+    state: NovelGenerationState,
+    chapter: GeneratedChapter,
+    chapter_number: int,
+    mem0_manager
+) -> Optional[ChapterMemoryEntry]:
+    """
+    生成章节记忆条目并保存到文件和 Mem0
+
+    Args:
+        state: 当前工作流状态
+        chapter: 已生成的章节
+        chapter_number: 章节编号
+        mem0_manager: Mem0Manager 实例
+
+    Returns:
+        ChapterMemoryEntry 对象，如果生成失败则返回 None
+    """
+    print(f"🧠 正在为第{chapter_number}章生成记忆条目...")
+    
+    try:
+        # 获取章节摘要（从大纲中）
+        outline_summary = None
+        if state.outline:
+            for ch in state.outline.chapters:
+                if ch.chapter_number == chapter_number:
+                    outline_summary = ch
+                    break
+        
+        # 生成场景摘要
+        scene_summaries_text = summarize_scenes(chapter.scenes)
+        scene_summaries = scene_summaries_text.split("\n") if scene_summaries_text else []
+        
+        # 聚合摘要
+        aggregated_summary = f"第{chapter_number}章「{chapter.chapter_title}」共{len(chapter.scenes)}个场景，{chapter.total_words}字"
+        
+        # 调用 LLM 生成章节记忆条目
+        memory_entry = generate_chapter_memory_entry(
+            chapter=chapter,
+            outline_summary=outline_summary,
+            scene_summaries=scene_summaries,
+            aggregated_summary=aggregated_summary,
+            verbose=False
+        )
+        
+        # 保存到 chapter_memory.json
+        _append_chapter_memory_entry(state.project_dir, memory_entry)
+        print(f"✅ 第{chapter_number}章记忆条目已保存")
+        
+        # 更新角色状态到 Mem0（传递故事时间线）
+        if mem0_manager and memory_entry.character_states:
+            _update_character_states_to_mem0(
+                mem0_manager, 
+                memory_entry.character_states, 
+                chapter_number,
+                story_timeline=memory_entry.timeline_anchor
+            )
+        
+        return memory_entry
+        
+    except Exception as exc:
+        print(f"⚠️ 章节记忆生成失败：{exc}")
+        return None
+
+
+def _append_chapter_memory_entry(project_dir: str, memory_entry: ChapterMemoryEntry):
+    """
+    将章节记忆条目追加到 chapter_memory.json
+    
+    Args:
+        project_dir: 项目目录
+        memory_entry: 章节记忆条目
+    """
+    memory_file = os.path.join(project_dir, "chapter_memory.json")
+    
+    # 读取现有记忆
+    existing_memories = []
+    if os.path.exists(memory_file):
+        try:
+            with open(memory_file, 'r', encoding='utf-8') as f:
+                existing_memories = json.load(f)
+        except (json.JSONDecodeError, Exception):
+            existing_memories = []
+    
+    # 追加新记忆
+    existing_memories.append(memory_entry.model_dump())
+    
+    # 保存
+    with open(memory_file, 'w', encoding='utf-8') as f:
+        json.dump(existing_memories, f, ensure_ascii=False, indent=2)
+
+
+def _update_character_states_to_mem0(
+    mem0_manager, 
+    character_states: Dict[str, str], 
+    chapter_number: int,
+    story_timeline: Optional[str] = None
+):
+    """
+    更新角色状态到 Mem0
+    
+    Args:
+        mem0_manager: Mem0Manager 实例
+        character_states: 角色状态字典 {角色名: 状态描述}
+        chapter_number: 章节编号
+        story_timeline: 故事时间线（如 "T+0 天"）
+    """
+    if not character_states:
+        return
+    
+    print(f"💾 正在更新角色状态到 Mem0...")
+    updated_count = 0
+    
+    for character_name, state_description in character_states.items():
+        try:
+            mem0_manager.add_entity_state(
+                entity_id=character_name,
+                entity_type="character",
+                state_description=state_description,
+                chapter_index=chapter_number,
+                story_timeline=story_timeline,
+            )
+            updated_count += 1
+        except Exception as char_exc:
+            print(f"⚠️ 更新角色 {character_name} 状态失败: {char_exc}")
+    
+    print(f"✅ 已更新 {updated_count} 个角色状态到 Mem0")
+
+
 def chapter_generation_node(state: NovelGenerationState) -> Dict[str, Any]:
     """
     章节文本生成节点（单章生成模式）
@@ -491,6 +682,10 @@ def chapter_generation_node(state: NovelGenerationState) -> Dict[str, Any]:
 
         plan = state.chapters_plan[chapter_number]
         chapters = dict(state.chapters)  # 复制现有章节
+        chapter_memories = list(state.chapter_memories)  # 复制现有记忆
+        
+        # 初始化 Mem0Manager（用于记忆检索和存储）
+        mem0_manager = _get_mem0_manager(state.project_dir, state.project_name)
 
         # 检查是否已存在章节（避免重复生成）
         chapters_dir = os.path.join(state.project_dir, "chapters")
@@ -507,8 +702,6 @@ def chapter_generation_node(state: NovelGenerationState) -> Dict[str, Any]:
             # 生成新章节
             print(f"📝 正在生成第 {chapter_number} 章：{plan.chapter_title}")
 
-            # 初始化 Mem0Manager（用于记忆检索和存储）
-            mem0_manager = _get_mem0_manager(state.project_dir, state.project_name)
             if mem0_manager:
                 print(f"    🧠 已初始化 Mem0 记忆检索")
             else:
@@ -568,9 +761,22 @@ def chapter_generation_node(state: NovelGenerationState) -> Dict[str, Any]:
 
             chapters[chapter_number] = chapter
             print(f"✅ 第 {chapter_number} 章生成完成，共 {chapter.total_words} 字")
+            
+            # 生成章节记忆并更新角色状态到 Mem0
+            memory_entry = _generate_and_save_chapter_memory(
+                state=state,
+                chapter=chapter,
+                chapter_number=chapter_number,
+                mem0_manager=mem0_manager
+            )
+            
+            # 将记忆条目添加到状态（用于后续章节的一致性检测）
+            if memory_entry:
+                chapter_memories.append(memory_entry)
 
         return {
             "chapters": chapters,
+            "chapter_memories": chapter_memories,
             "current_step": "chapter_generation",
             "completed_steps": state.completed_steps + [f"chapter_generation_{chapter_number}"]
         }

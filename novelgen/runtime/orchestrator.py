@@ -28,6 +28,7 @@ from novelgen.runtime.memory import generate_chapter_memory_entry
 from novelgen.runtime.consistency import run_consistency_check
 from novelgen.chains.chapter_revision_chain import revise_chapter
 from novelgen.runtime.workflow import create_novel_generation_workflow
+from novelgen.runtime.mem0_manager import Mem0Manager
 from novelgen.models import NovelGenerationState
 from datetime import datetime
 from typing import Dict as TypingDict
@@ -60,7 +61,7 @@ class NovelOrchestrator:
         os.makedirs(self.config.chapters_dir, exist_ok=True)
 
         # 初始化 Mem0 管理器（作为唯一的记忆层）
-        self.mem0_manager: Optional[Any] = None
+        self.mem0_manager: Optional[Mem0Manager] = None
         
         # 检查 Mem0 配置
         if not hasattr(self.config, 'mem0_config') or not self.config.mem0_config:
@@ -450,7 +451,8 @@ class NovelOrchestrator:
             return f"自动总结失败({exc})。片段汇总：{' '.join(snippets)}"
 
     def _save_entity_state(self, entity_type: str, entity_id: str, state_description: str, 
-                          chapter_index: Optional[int] = None, scene_index: Optional[int] = None):
+                          chapter_index: Optional[int] = None, scene_index: Optional[int] = None,
+                          story_timeline: Optional[str] = None):
         """保存实体状态到 Mem0"""
         try:
             self.mem0_manager.add_entity_state(
@@ -459,6 +461,7 @@ class NovelOrchestrator:
                 state_description=state_description,
                 chapter_index=chapter_index,
                 scene_index=scene_index,
+                story_timeline=story_timeline,
             )
         except Exception as e:
             print(f"⚠️ 保存实体状态到 Mem0 失败: {e}")
@@ -833,6 +836,7 @@ class NovelOrchestrator:
                 entity_type="character",
                 state_description=f"角色初始状态：{characters.protagonist.personality}。背景：{characters.protagonist.background}",
                 chapter_index=0,
+                story_timeline="故事开始",
             )
             # 反派
             if characters.antagonist:
@@ -841,6 +845,7 @@ class NovelOrchestrator:
                     entity_type="character",
                     state_description=f"角色初始状态：{characters.antagonist.personality}。背景：{characters.antagonist.background}",
                     chapter_index=0,
+                    story_timeline="故事开始",
                 )
             # 配角
             for character in characters.supporting_characters:
@@ -849,6 +854,7 @@ class NovelOrchestrator:
                     entity_type="character",
                     state_description=f"角色初始状态：{character.personality}。背景：{character.background}",
                     chapter_index=0,
+                    story_timeline="故事开始",
                 )
             print(f"✅ 已为 {1 + (1 if characters.antagonist else 0) + len(characters.supporting_characters)} 个角色初始化 Mem0 记忆")
         except Exception as e:
@@ -1210,7 +1216,7 @@ class NovelOrchestrator:
             self._append_chapter_memory_entry(memory_entry)
             print(f"✅ 第{chapter_number}章记忆条目已保存")
             
-            # 更新角色状态到 Mem0（从 chapter_memory_entry 中提取）
+            # 更新角色状态到 Mem0（从 chapter_memory_entry 中提取，包含故事时间线）
             if memory_entry.character_states:
                 print(f"💾 正在更新角色状态到 Mem0...")
                 for character_name, state_description in memory_entry.character_states.items():
@@ -1220,6 +1226,7 @@ class NovelOrchestrator:
                             entity_type="character",
                             state_description=state_description,
                             chapter_index=chapter_number,
+                            story_timeline=memory_entry.timeline_anchor,
                         )
                     except Exception as char_exc:
                         print(f"⚠️ 更新角色 {character_name} 状态失败: {char_exc}")

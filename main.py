@@ -121,7 +121,7 @@ def apply_revision_cmd(project_name: str, chapter_number: int, rebuild_memory: b
 if __name__ == "__main__":
     # test_generate_chapter_text()
     try:
-        demo_full_flow("demo_015")
+        demo_full_flow("demo_018")
     except KeyboardInterrupt:
         print("\n程序被用户中断")
     # export_novel_cmd("demo_001")

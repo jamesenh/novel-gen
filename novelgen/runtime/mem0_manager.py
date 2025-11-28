@@ -33,6 +33,21 @@ logger = logging.getLogger(__name__)
 T = TypeVar('T')
 
 
+def _filter_none_values(metadata: Dict[str, Any]) -> Dict[str, Any]:
+    """过滤掉 metadata 中的 None 值
+    
+    ChromaDB 不接受 None 值作为 metadata，会导致保存失败。
+    此函数移除所有值为 None 的键值对。
+    
+    Args:
+        metadata: 原始 metadata 字典
+        
+    Returns:
+        过滤后的 metadata 字典（不包含 None 值）
+    """
+    return {k: v for k, v in metadata.items() if v is not None}
+
+
 def _is_timeout_error(error: Exception) -> bool:
     """判断是否为超时错误
 
@@ -276,6 +291,24 @@ class Mem0Manager:
                 )
             
             # ==================== 配置 Mem0 ====================
+            # 中文事实提取提示词，确保 Mem0 的 LLM 输出中文
+            chinese_fact_extraction_prompt = """
+请从以下内容中提取关键事实，必须使用中文输出。
+提取规则：
+1. 保留角色名称、性格特点、背景信息
+2. 保留状态变化和关键事件
+3. 输出格式为 JSON: {"facts": ["事实1", "事实2", ...]}
+
+输入示例：
+Input: [character] 艾瑞克·索恩 (章节 1): 意识开始稀释，左眼半透明并流动星轨光流
+Output: {"facts": ["艾瑞克·索恩意识开始稀释", "左眼半透明并流动星轨光流"]}
+
+Input: Hi, how are you?
+Output: {"facts": []}
+
+请用中文提取以下内容的事实：
+"""
+            
             mem0_config = {
                 "vector_store": {
                     "provider": "chroma",
@@ -285,6 +318,7 @@ class Mem0Manager:
                     }
                 },
                 "embedder": embedder_config,
+                "custom_fact_extraction_prompt": chinese_fact_extraction_prompt,
             }
             
             # 如果配置了 LLM，添加到配置中
@@ -519,6 +553,7 @@ class Mem0Manager:
         state_description: str,
         chapter_index: Optional[int] = None,
         scene_index: Optional[int] = None,
+        story_timeline: Optional[str] = None,
     ) -> bool:
         """添加实体状态到 Mem0（使用 Agent Memory）
 
@@ -531,6 +566,7 @@ class Mem0Manager:
             state_description: 状态描述（自然语言）
             chapter_index: 章节索引（可选）
             scene_index: 场景索引（可选）
+            story_timeline: 故事时间线（可选，如 "T+0 天"、"T+7 天"）
 
         Returns:
             bool: 是否成功添加（如果重试全部失败返回 False）
@@ -539,25 +575,28 @@ class Mem0Manager:
 
         agent_id = f"{self.project_id}_{entity_id}"
 
-        # 构造记忆文本
+        # 构造记忆文本（包含故事时间线）
         location_info = ""
         if chapter_index is not None:
             location_info = f" (章节 {chapter_index}"
             if scene_index is not None:
                 location_info += f", 场景 {scene_index}"
+            if story_timeline:
+                location_info += f", 时间线: {story_timeline}"
             location_info += ")"
 
         memory_text = f"[{entity_type}] {entity_id}{location_info}: {state_description}"
 
-        # 添加元数据
-        metadata = {
+        # 添加元数据（过滤 None 值，避免 ChromaDB 保存失败）
+        metadata = _filter_none_values({
             "entity_id": entity_id,
             "entity_type": entity_type,
             "project_id": self.project_id,
             "chapter_index": chapter_index,
             "scene_index": scene_index,
+            "story_timeline": story_timeline,
             "timestamp": datetime.now().isoformat(),
-        }
+        })
 
         # 定义添加操作（用于重试机制）
         def add_state_to_mem0() -> bool:
@@ -816,14 +855,14 @@ class Mem0Manager:
                 "timestamp": datetime.now().isoformat(),
             }
 
-            # 使用 run_id 作为场景记忆的标识
-            run_id = f"{self.project_id}_scene_{chapter_index}_{scene_index}"
+            # 使用 agent_id 作为场景记忆的标识（统一使用项目级 agent_id 便于搜索）
+            scene_agent_id = f"{self.project_id}_scene_content"
 
             # 定义添加操作（用于重试机制）
             def add_chunk_to_mem0() -> bool:
                 self.client.add(
                     messages=[{"role": "assistant", "content": memory_text}],
-                    run_id=run_id,
+                    agent_id=scene_agent_id,
                     metadata=metadata,
                 )
                 return True
@@ -875,6 +914,7 @@ class Mem0Manager:
         self,
         query: str,
         chapter_index: Optional[int] = None,
+        scene_index: Optional[int] = None,
         limit: int = 10
     ) -> List[StoryMemoryChunk]:
         """搜索场景内容
@@ -882,24 +922,26 @@ class Mem0Manager:
         Args:
             query: 查询关键词
             chapter_index: 可选的章节索引过滤
+            scene_index: 可选的场景索引过滤
             limit: 返回结果数量上限
 
         Returns:
             相关记忆块列表
 
         Note:
-            Mem0 v1.0.0 的 search() 方法返回格式为 {"results": [...]}
-            需要从返回值中提取 "results" 字段
+            场景内容使用 run_id 存储（格式：{project_id}_scene_{chapter}_{scene}）
+            搜索时需要使用对应的 run_id，或者不指定 id 进行全局搜索
         """
         self._ensure_initialized()
 
         try:
-            # 搜索所有场景记忆
-            agent_id = self.project_id
+            # 场景内容使用统一的 agent_id 存储（{project_id}_scene_content）
+            # 搜索时使用相同的 agent_id，通过 metadata 进行章节/场景过滤
+            scene_agent_id = f"{self.project_id}_scene_content"
             response = self.client.search(
                 query=query,
-                agent_id=agent_id,
-                limit=limit * 2,  # 获取更多结果用于过滤
+                agent_id=scene_agent_id,
+                limit=limit * 3,  # 获取更多结果用于 metadata 过滤
             )
 
             # Mem0 v1.0.0 返回格式为 {"results": [...]}
@@ -930,6 +972,10 @@ class Mem0Manager:
 
                 # 章节过滤
                 if chapter_index is not None and metadata.get("chapter_index") != chapter_index:
+                    continue
+                
+                # 场景过滤
+                if scene_index is not None and metadata.get("scene_index") != scene_index:
                     continue
 
                 chunk = StoryMemoryChunk(
