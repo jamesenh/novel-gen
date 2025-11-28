@@ -1,16 +1,19 @@
 """
 数据模型定义
 所有业务相关的数据结构都定义在此文件中
+
+更新: 2025-11-28 - 添加动态章节数量支持（StoryProgressEvaluation, Settings/Outline 字段变更）
 """
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class Settings(BaseModel):
     """全局设置
     
     更新: 2025-11-25 - 移除 persistence_enabled 和 vector_store_enabled，统一使用 Mem0
+    更新: 2025-11-28 - 支持动态章节数量，num_chapters 改为 initial_chapters + max_chapters
     """
     project_name: str = Field(description="项目名称")
     author: str = Field(default="Jamesenh", description="作者")
@@ -20,7 +23,30 @@ class Settings(BaseModel):
     # 用户输入字段（用于工作流）
     world_description: str = Field(description="世界观描述")
     theme_description: Optional[str] = Field(default="", description="主题描述（可选）")
-    num_chapters: int = Field(default=10, description="章节数量")
+    
+    # 动态章节数量配置
+    initial_chapters: int = Field(default=2, description="初始规划章节数（开篇阶段）")
+    max_chapters: int = Field(default=50, description="最大章节数（防止无限生成）")
+    
+    # 向后兼容：保留 num_chapters 字段，加载旧配置时会自动迁移
+    num_chapters: Optional[int] = Field(default=None, description="[已废弃] 请使用 initial_chapters 和 max_chapters")
+    
+    @model_validator(mode='after')
+    def validate_chapter_settings(self) -> 'Settings':
+        """验证章节配置的合法性，并处理旧配置迁移"""
+        # 向后兼容：如果只有 num_chapters，自动迁移到新字段
+        if self.num_chapters is not None and self.initial_chapters == 5:
+            # 旧配置迁移：initial_chapters 取 num_chapters，max_chapters 取 3 倍
+            self.initial_chapters = self.num_chapters
+            self.max_chapters = max(self.num_chapters * 3, 50)
+        
+        # 验证 initial_chapters <= max_chapters
+        if self.initial_chapters > self.max_chapters:
+            raise ValueError(
+                f"initial_chapters ({self.initial_chapters}) 不能大于 max_chapters ({self.max_chapters})"
+            )
+        
+        return self
 
 
 class WorldSetting(BaseModel):
@@ -84,13 +110,26 @@ class ChapterSummary(BaseModel):
 
 
 class Outline(BaseModel):
-    """小说大纲"""
+    """小说大纲
+    
+    更新: 2025-11-28 - 支持动态章节扩展，添加 is_complete 和 current_phase 字段
+    """
     story_premise: str = Field(description="故事前提")
     beginning: str = Field(description="开端")
     development: str = Field(description="发展")
     climax: str = Field(description="高潮")
     resolution: str = Field(description="结局")
     chapters: List[ChapterSummary] = Field(description="章节列表")
+    
+    # 动态章节扩展支持
+    is_complete: bool = Field(
+        default=True,  # 默认 True 以兼容旧项目（视为已完成规划）
+        description="大纲是否已包含结局章节（True=固定章节模式，False=可动态扩展）"
+    )
+    current_phase: str = Field(
+        default="complete",  # 默认 complete 以兼容旧项目
+        description="当前故事阶段: opening/development/climax/resolution/complete"
+    )
 
 
 class ScenePlan(BaseModel):
@@ -139,6 +178,35 @@ class ChapterMemoryEntry(BaseModel):
     character_states: Dict[str, str] = Field(default_factory=dict, description="关键角色当前状态")
     unresolved_threads: List[str] = Field(default_factory=list, description="未解决的悬念或任务")
     summary: str = Field(description="章节摘要（整章）")
+
+
+class StoryProgressEvaluation(BaseModel):
+    """剧情进度评估结果
+    
+    用于动态章节扩展时评估当前剧情进度，决定是继续、收尾还是强制结束
+    
+    开发者: jamesenh, 开发时间: 2025-11-28
+    """
+    evaluation_result: Literal["continue", "wrap_up", "force_end"] = Field(
+        description="评估结果: continue=继续发展, wrap_up=开始收尾, force_end=强制结束"
+    )
+    # 这两个字段由调用方计算后补充，LLM 不需要生成，因此设置默认值
+    current_chapter: int = Field(default=0, description="当前已完成的章节数（由调用方设置）")
+    remaining_chapters: int = Field(default=0, description="剩余可用章节数（由调用方设置）")
+    main_conflict_progress: float = Field(
+        description="主线冲突解决进度（0.0-1.0），1.0 表示主线冲突已完全解决"
+    )
+    unresolved_threads: List[str] = Field(
+        default_factory=list,
+        description="当前未解决的伏笔/支线列表"
+    )
+    character_arc_status: Dict[str, str] = Field(
+        default_factory=dict,
+        description="主要角色弧光状态（角色名 -> 状态描述）"
+    )
+    recommendation: str = Field(
+        description="LLM 给出的建议说明，解释为何做出该评估结果"
+    )
 
 
 class ConsistencyIssue(BaseModel):
@@ -239,7 +307,7 @@ class Mem0Config(BaseModel):
     llm_model_name: Optional[str] = Field(default=None, description="Mem0 内部使用的 LLM 模型名称")
     llm_api_key: Optional[str] = Field(default=None, description="LLM API Key（如不设置则使用 OPENAI_API_KEY）")
     llm_base_url: Optional[str] = Field(default=None, description="LLM API Base URL（如不设置则使用 OPENAI_BASE_URL）")
-    llm_temperature: float = Field(default=0.1, description="LLM 温度参数（记忆处理建议较低值）")
+    llm_temperature: float = Field(default=0.0, description="LLM 温度参数（默认 0.0 以获得稳定的 JSON 输出）")
     llm_max_tokens: int = Field(default=2000, description="LLM 最大 token 数")
     # 重试配置（用于处理网络超时等问题）
     request_timeout: int = Field(default=30, description="请求超时时间（秒）")
@@ -265,6 +333,7 @@ class NovelGenerationState(BaseModel):
     
     开发者: jamesenh, 开发时间: 2025-11-21
     更新: 2025-11-25 - 移除 db_manager/vector_manager，使用 mem0_manager
+    更新: 2025-11-28 - 添加 story_progress_evaluation 支持动态章节扩展
     """
     # 项目元信息
     project_name: str = Field(description="项目名称")
@@ -289,6 +358,12 @@ class NovelGenerationState(BaseModel):
     # 一致性与修订
     consistency_reports: Dict[int, ConsistencyReport] = Field(default_factory=dict, description="一致性报告（章节编号 -> 报告）")
     
+    # 动态章节扩展
+    story_progress_evaluation: Optional[StoryProgressEvaluation] = Field(
+        default=None,
+        description="剧情进度评估结果（用于动态章节扩展决策）"
+    )
+    
     # 工作流控制
     current_step: str = Field(default="init", description="当前步骤标识")
     current_chapter_number: Optional[int] = Field(default=None, description="当前正在生成的章节编号")
@@ -296,5 +371,50 @@ class NovelGenerationState(BaseModel):
     failed_steps: List[str] = Field(default_factory=list, description="失败步骤列表")
     error_messages: Dict[str, str] = Field(default_factory=dict, description="错误消息（步骤 -> 错误信息）")
     
+    # 运行时配置
+    verbose: bool = Field(default=False, description="是否启用详细日志输出（显示提示词、响应时间、token使用情况）")
+    show_prompt: bool = Field(default=True, description="verbose 模式下是否显示完整提示词")
+    
     # 注意：Mem0Manager 不能放在状态中，因为 LangGraph 的 checkpoint 使用 msgpack 序列化，
     # 无法序列化复杂对象。应通过 orchestrator 级别管理 mem0_manager。
+
+
+class SceneGenerationState(BaseModel):
+    """
+    场景生成子工作流状态
+    
+    独立于 NovelGenerationState，用于场景级别的检查点和断点续跑。
+    根据 LangGraph 最佳实践，子图应使用独立的状态类型，不污染父图状态。
+    
+    开发者: jamesenh, 开发时间: 2025-11-28
+    """
+    # 章节信息
+    chapter_number: int = Field(description="当前章节编号")
+    chapter_plan: Optional[ChapterPlan] = Field(default=None, description="章节计划")
+    
+    # 场景循环控制
+    current_scene_number: int = Field(default=1, description="当前场景编号（从1开始）")
+    total_scenes: int = Field(default=0, description="总场景数")
+    generated_scenes: List[GeneratedScene] = Field(
+        default_factory=list, 
+        description="已生成的场景列表"
+    )
+    scene_status: Dict[int, str] = Field(
+        default_factory=dict,
+        description="场景状态: pending/generating/completed/failed"
+    )
+    
+    # 上下文传递
+    previous_summary: str = Field(default="", description="前一场景摘要，用于衔接")
+    scene_memory_context: Optional[SceneMemoryContext] = Field(
+        default=None, 
+        description="当前场景的记忆上下文"
+    )
+    
+    # 从父图传入的只读上下文（必须有默认值以兼容 model_construct）
+    world: Optional[WorldSetting] = Field(default=None, description="世界观设定")
+    characters: Optional[CharactersConfig] = Field(default=None, description="角色配置")
+    project_dir: str = Field(default="", description="项目目录")
+    project_name: str = Field(default="", description="项目名称")
+    verbose: bool = Field(default=False, description="详细日志")
+    show_prompt: bool = Field(default=True, description="verbose 模式下是否显示完整提示词")

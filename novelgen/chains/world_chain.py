@@ -9,9 +9,9 @@ from novelgen.llm import get_llm
 from novelgen.chains.output_fixing import LLMJsonRepairOutputParser
 
 
-def create_world_chain(verbose: bool = False, llm_config=None):
+def create_world_chain(verbose: bool = False, llm_config=None, show_prompt: bool = True):
     """创建世界观生成链"""
-    llm = get_llm(config=llm_config, verbose=verbose)
+    llm = get_llm(config=llm_config, verbose=verbose, show_prompt=show_prompt)
     base_parser = PydanticOutputParser[WorldSetting](pydantic_object=WorldSetting)
     parser = LLMJsonRepairOutputParser[WorldSetting](parser=base_parser, llm=llm)
 
@@ -43,7 +43,7 @@ def create_world_chain(verbose: bool = False, llm_config=None):
     return chain
 
 
-def generate_world(user_input: str, verbose: bool = False, llm_config=None) -> WorldSetting:
+def generate_world(user_input: str, verbose: bool = False, llm_config=None, show_prompt: bool = True) -> WorldSetting:
     """
     生成世界观
 
@@ -51,11 +51,12 @@ def generate_world(user_input: str, verbose: bool = False, llm_config=None) -> W
         user_input: 用户输入的世界设定描述
         verbose: 是否输出详细日志（提示词、时间、token）
         llm_config: LLM配置
+        show_prompt: verbose 模式下是否显示完整提示词
 
     Returns:
         WorldSetting对象
     """
-    chain = create_world_chain(verbose=verbose, llm_config=llm_config)
+    chain = create_world_chain(verbose=verbose, llm_config=llm_config, show_prompt=show_prompt)
     parser = PydanticOutputParser[WorldSetting](pydantic_object=WorldSetting)
 
     result = chain.invoke({

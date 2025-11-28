@@ -7,8 +7,14 @@ import json
 from novelgen.runtime.orchestrator import NovelOrchestrator
 
 
-def demo_full_flow(project_name):
-    """演示完整的小说生成流程（使用 LangGraph 工作流）"""
+def demo_full_flow(project_name, verbose=False, show_prompt=True):
+    """演示完整的小说生成流程（使用 LangGraph 工作流）
+    
+    Args:
+        project_name: 项目名称
+        verbose: 是否启用详细日志
+        show_prompt: verbose 模式下是否显示完整提示词（默认 True）
+    """
     
     # 1. 准备项目目录和 settings.json
     project_dir = os.path.join("projects", project_name)
@@ -37,7 +43,7 @@ def demo_full_flow(project_name):
         print(f"📂 settings.json 已存在: {settings_path}")
     
     # 2. 创建编排器
-    orchestrator = NovelOrchestrator(project_name=project_name, verbose=False)
+    orchestrator = NovelOrchestrator(project_name=project_name, verbose=verbose, show_prompt=show_prompt)
     print(f"📁 项目目录: {orchestrator.project_dir}")
     
     # 3. 运行 LangGraph 工作流
@@ -121,7 +127,8 @@ def apply_revision_cmd(project_name: str, chapter_number: int, rebuild_memory: b
 if __name__ == "__main__":
     # test_generate_chapter_text()
     try:
-        demo_full_flow("demo_018")
+        # verbose=True 显示详细日志，show_prompt=False 不显示提示词（只看响应）
+        demo_full_flow("demo_019", verbose=True, show_prompt=False)
     except KeyboardInterrupt:
         print("\n程序被用户中断")
     # export_novel_cmd("demo_001")

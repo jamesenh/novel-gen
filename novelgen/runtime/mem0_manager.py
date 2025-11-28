@@ -12,12 +12,16 @@ Mem0 记忆管理器
 更新: 2025-11-27 - 修复 Mem0 v1.0.0 返回值格式变化导致的问题
                    search() 和 get_all() 现在返回 {"results": [...]} 而不是列表
                  - 添加超时重试机制，支持指数退避策略
+更新: 2025-11-28 - 添加 Mem0 内部警告抑制功能，避免 UPDATE 事件的警告输出干扰日志
 """
 import logging
 import uuid
 import re
 import time
-from typing import List, Dict, Optional, Any, TYPE_CHECKING, TypeVar, Callable
+import sys
+import io
+from contextlib import contextmanager
+from typing import List, Dict, Optional, Any, TYPE_CHECKING, TypeVar, Callable, Generator
 from datetime import datetime
 
 from novelgen.models import Mem0Config, UserPreference, EntityStateSnapshot, StoryMemoryChunk
@@ -28,6 +32,13 @@ else:
     EmbeddingConfig = Any
 
 logger = logging.getLogger(__name__)
+
+# 抑制 Mem0 内部的非致命错误日志（如 JSON 解析失败等）
+# 这些错误不影响主流程，但会干扰用户日志
+# 可通过环境变量 MEM0_LOG_LEVEL 控制（默认 WARNING）
+import os as _os
+_mem0_log_level = _os.getenv("MEM0_LOG_LEVEL", "WARNING").upper()
+logging.getLogger("mem0").setLevel(getattr(logging, _mem0_log_level, logging.WARNING))
 
 # 类型变量，用于泛型函数返回值
 T = TypeVar('T')
@@ -68,6 +79,61 @@ def _is_timeout_error(error: Exception) -> bool:
         "connection timed out",
     ]
     return any(keyword in error_str for keyword in timeout_keywords)
+
+
+@contextmanager
+def _suppress_mem0_internal_warnings() -> Generator[io.StringIO, None, None]:
+    """抑制 Mem0 内部的警告输出
+    
+    Mem0 库在处理记忆更新（UPDATE 事件）时会通过 print() 输出警告信息，
+    如 "Error processing memory action: {...}, Error: '37'"。
+    这些警告是 Mem0 内部的非致命性问题，不影响主流程。
+    
+    此上下文管理器临时捕获这些输出，避免干扰用户日志。
+    
+    Yields:
+        StringIO: 捕获的输出内容（可用于调试）
+    
+    Example:
+        with _suppress_mem0_internal_warnings() as captured:
+            mem0_client.add(...)
+        # 如需调试，可检查 captured.getvalue()
+    """
+    captured_output = io.StringIO()
+    old_stdout = sys.stdout
+    old_stderr = sys.stderr
+    
+    # 创建一个过滤器，只抑制 Mem0 内部警告
+    class Mem0WarningFilter:
+        """过滤 Mem0 内部警告，其他输出正常显示"""
+        
+        def __init__(self, original_stream: Any, capture_buffer: io.StringIO):
+            self.original = original_stream
+            self.capture = capture_buffer
+        
+        def write(self, message: str) -> int:
+            # 检查是否为 Mem0 内部警告
+            if "Error processing memory action" in message:
+                # 捕获但不显示，记录到 debug 日志
+                self.capture.write(message)
+                logger.debug(f"[Mem0 内部警告已抑制] {message.strip()}")
+                return len(message)
+            # 其他输出正常显示
+            return self.original.write(message)
+        
+        def flush(self) -> None:
+            self.original.flush()
+        
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.original, name)
+    
+    try:
+        sys.stdout = Mem0WarningFilter(old_stdout, captured_output)  # type: ignore
+        sys.stderr = Mem0WarningFilter(old_stderr, captured_output)  # type: ignore
+        yield captured_output
+    finally:
+        sys.stdout = old_stdout
+        sys.stderr = old_stderr
 
 
 class Mem0TimeoutError(Exception):
@@ -428,13 +494,14 @@ Output: {"facts": []}
             "timestamp": datetime.now().isoformat(),
         }
 
-        # 定义添加操作（用于重试机制）
+        # 定义添加操作（用于重试机制，使用警告抑制器避免 Mem0 内部 UPDATE 警告）
         def add_preference_to_mem0() -> bool:
-            self.client.add(
-                messages=[{"role": "user", "content": memory_text}],
-                user_id=user_id,
-                metadata=metadata,
-            )
+            with _suppress_mem0_internal_warnings():
+                self.client.add(
+                    messages=[{"role": "user", "content": memory_text}],
+                    user_id=user_id,
+                    metadata=metadata,
+                )
             return True
 
         # 使用重试机制执行添加操作（启用优雅降级）
@@ -598,13 +665,14 @@ Output: {"facts": []}
             "timestamp": datetime.now().isoformat(),
         })
 
-        # 定义添加操作（用于重试机制）
+        # 定义添加操作（用于重试机制，使用警告抑制器避免 Mem0 内部 UPDATE 警告）
         def add_state_to_mem0() -> bool:
-            self.client.add(
-                messages=[{"role": "assistant", "content": memory_text}],
-                agent_id=agent_id,
-                metadata=metadata,
-            )
+            with _suppress_mem0_internal_warnings():
+                self.client.add(
+                    messages=[{"role": "assistant", "content": memory_text}],
+                    agent_id=agent_id,
+                    metadata=metadata,
+                )
             return True
 
         # 使用重试机制执行添加操作（启用优雅降级）
@@ -858,13 +926,14 @@ Output: {"facts": []}
             # 使用 agent_id 作为场景记忆的标识（统一使用项目级 agent_id 便于搜索）
             scene_agent_id = f"{self.project_id}_scene_content"
 
-            # 定义添加操作（用于重试机制）
+            # 定义添加操作（用于重试机制，使用警告抑制器避免 Mem0 内部 UPDATE 警告）
             def add_chunk_to_mem0() -> bool:
-                self.client.add(
-                    messages=[{"role": "assistant", "content": memory_text}],
-                    agent_id=scene_agent_id,
-                    metadata=metadata,
-                )
+                with _suppress_mem0_internal_warnings():
+                    self.client.add(
+                        messages=[{"role": "assistant", "content": memory_text}],
+                        agent_id=scene_agent_id,
+                        metadata=metadata,
+                    )
                 return True
 
             # 使用重试机制执行添加操作（启用优雅降级）

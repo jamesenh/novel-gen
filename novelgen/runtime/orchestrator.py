@@ -40,13 +40,14 @@ class NovelOrchestrator:
     使用 Mem0 作为唯一的记忆层，不再支持 SQLite 和独立 VectorStore 的降级模式
     """
 
-    def __init__(self, project_name: str, base_dir: str = "projects", verbose: bool = False):
+    def __init__(self, project_name: str, base_dir: str = "projects", verbose: bool = False, show_prompt: bool = True):
         """初始化编排器
 
         Args:
             project_name: 项目名称
             base_dir: 项目基础目录
             verbose: 是否启用详细日志（显示提示词、响应时间、token使用情况）
+            show_prompt: verbose 模式下是否显示完整提示词（默认 True）
 
         Raises:
             RuntimeError: 如果 Mem0 未启用或初始化失败
@@ -55,6 +56,7 @@ class NovelOrchestrator:
         self.project_dir = os.path.join(base_dir, project_name)
         self.config = ProjectConfig(project_dir=self.project_dir)
         self.verbose = verbose
+        self.show_prompt = show_prompt
 
         # 创建项目目录
         os.makedirs(self.project_dir, exist_ok=True)
@@ -555,7 +557,9 @@ class NovelOrchestrator:
                 chapters_plan=chapters_plan,
                 chapters=chapters,
                 chapter_memories=chapter_memories,
-                completed_steps=completed_steps
+                completed_steps=completed_steps,
+                verbose=self.verbose,  # 传递 verbose 参数到工作流状态
+                show_prompt=self.show_prompt  # 传递 show_prompt 参数到工作流状态
                 # 注意：mem0_manager 不放入状态，因为它无法被 msgpack 序列化
                 # 在 orchestrator 级别通过 self.mem0_manager 管理
             )

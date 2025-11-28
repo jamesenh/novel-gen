@@ -12,9 +12,9 @@ from novelgen.llm import get_llm
 from novelgen.chains.output_fixing import LLMJsonRepairOutputParser
 
 
-def create_theme_conflict_chain(verbose: bool = False, llm_config=None):
+def create_theme_conflict_chain(verbose: bool = False, llm_config=None, show_prompt: bool = True):
     """创建主题冲突生成链"""
-    llm = get_llm(config=llm_config, verbose=verbose)
+    llm = get_llm(config=llm_config, verbose=verbose, show_prompt=show_prompt)
     base_parser = PydanticOutputParser[ThemeConflict](pydantic_object=ThemeConflict)
     parser = LLMJsonRepairOutputParser[ThemeConflict](parser=base_parser, llm=llm)
 
@@ -51,7 +51,7 @@ def create_theme_conflict_chain(verbose: bool = False, llm_config=None):
     return chain
 
 
-def generate_theme_conflict(world_setting: WorldSetting, user_input: str = "", verbose: bool = False, llm_config=None) -> ThemeConflict:
+def generate_theme_conflict(world_setting: WorldSetting, user_input: str = "", verbose: bool = False, llm_config=None, show_prompt: bool = True) -> ThemeConflict:
     """
     生成主题冲突
 
@@ -60,11 +60,12 @@ def generate_theme_conflict(world_setting: WorldSetting, user_input: str = "", v
         user_input: 用户关于故事方向的描述
         verbose: 是否输出详细日志（提示词、时间、token）
         llm_config: LLM配置
+        show_prompt: verbose 模式下是否显示完整提示词
 
     Returns:
         ThemeConflict对象
     """
-    chain = create_theme_conflict_chain(verbose=verbose, llm_config=llm_config)
+    chain = create_theme_conflict_chain(verbose=verbose, llm_config=llm_config, show_prompt=show_prompt)
     parser = PydanticOutputParser[ThemeConflict](pydantic_object=ThemeConflict)
 
     result = chain.invoke({

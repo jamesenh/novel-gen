@@ -5,6 +5,8 @@ LangGraph 工作流定义
 开发者: jamesenh, 开发时间: 2025-11-21
 更新: 2025-11-25 - 使用 SqliteSaver 替代 MemorySaver 实现检查点持久化
 更新: 2025-11-27 - 添加条件边实现状态持久化，自动跳过已完成的节点
+更新: 2025-11-28 - 添加动态章节扩展支持（evaluate_story_progress, extend_outline, plan_new_chapters）
+更新: 2025-11-28 - 添加场景生成子工作流支持（scene_generation_subgraph）
 """
 import os
 import sqlite3
@@ -13,7 +15,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-from novelgen.models import NovelGenerationState
+from novelgen.models import NovelGenerationState, SceneGenerationState
 from novelgen.runtime.nodes import (
     load_settings_node,
     world_creation_node,
@@ -22,10 +24,24 @@ from novelgen.runtime.nodes import (
     outline_creation_node,
     chapter_planning_node,
     init_chapter_loop_node,
-    chapter_generation_node,
+    # 使用新的包装节点替代原来的 chapter_generation_node
+    scene_generation_wrapper_node,
     consistency_check_node,
     chapter_revision_node,
-    next_chapter_node
+    next_chapter_node,
+    # 动态章节扩展节点
+    evaluate_story_progress_node,
+    extend_outline_node,
+    plan_new_chapters_node,
+    # 场景生成子图节点
+    init_scene_loop_node,
+    should_generate_scene,
+    retrieve_scene_memory_node,
+    generate_scene_node,
+    save_scene_node,
+    next_scene_node,
+    has_more_scenes,
+    skip_scene_node
 )
 
 
@@ -136,13 +152,15 @@ def skip_node(state: NovelGenerationState) -> Dict[str, Any]:
 
 def create_novel_generation_workflow(checkpointer=None, project_dir: Optional[str] = None):
     """
-    创建小说生成工作流（逐章生成模式，支持自动跳过已完成节点）
+    创建小说生成工作流（逐章生成模式，支持自动跳过已完成节点和动态章节扩展）
 
     工作流结构：
     1. 前置步骤：设置 → [世界观] → [主题冲突] → [角色] → [大纲] → [章节计划]
        - 方括号表示会检查是否已完成，已完成则跳过
     2. 循环生成：[生成单章 → 一致性检测 → 修订(如需要) → 下一章] × N
        - 章节生成也会检查该章是否已存在
+    3. 动态扩展：当已规划章节生成完毕且大纲未完成时
+       - 评估剧情进度 → 扩展大纲 → 生成新章节计划 → 继续生成
 
     Args:
         checkpointer: 检查点保存器（可选）
@@ -150,6 +168,8 @@ def create_novel_generation_workflow(checkpointer=None, project_dir: Optional[st
 
     Returns:
         编译后的 StateGraph 工作流
+    
+    更新: 2025-11-28 - 添加动态章节扩展支持
     """
     # 创建 StateGraph，使用 NovelGenerationState 作为状态模型
     workflow = StateGraph[NovelGenerationState, None, NovelGenerationState, NovelGenerationState](NovelGenerationState)
@@ -163,10 +183,16 @@ def create_novel_generation_workflow(checkpointer=None, project_dir: Optional[st
     workflow.add_node("outline_creation", outline_creation_node)
     workflow.add_node("chapter_planning", chapter_planning_node)
     workflow.add_node("init_chapter_loop", init_chapter_loop_node)
-    workflow.add_node("chapter_generation", chapter_generation_node)
+    # 使用场景生成包装节点（支持场景级断点续跑）
+    workflow.add_node("chapter_generation", scene_generation_wrapper_node)
     workflow.add_node("consistency_check", consistency_check_node)
     workflow.add_node("chapter_revision", chapter_revision_node)
     workflow.add_node("next_chapter", next_chapter_node)
+    
+    # 动态章节扩展节点
+    workflow.add_node("evaluate_story_progress", evaluate_story_progress_node)
+    workflow.add_node("extend_outline", extend_outline_node)
+    workflow.add_node("plan_new_chapters", plan_new_chapters_node)
 
     # 跳过节点（用于条件边路由）
     workflow.add_node("skip_world", skip_node)
@@ -318,42 +344,83 @@ def create_novel_generation_workflow(checkpointer=None, project_dir: Optional[st
     # 修订后进入下一章判断
     workflow.add_edge("chapter_revision", "next_chapter")
     
-    # 条件分支 2：判断是否还有更多章节需要生成，并检查是否需要跳过
-    def should_continue_or_skip_generation(state: NovelGenerationState) -> Literal["execute", "skip", "end"]:
+    # 条件分支 2：判断是否继续生成、需要评估扩展、还是结束
+    # 更新: 2025-11-28 - 支持动态章节扩展
+    def should_evaluate_or_continue(state: NovelGenerationState) -> Literal["execute", "skip", "evaluate", "end"]:
         """
-        判断是否继续生成下一章，以及是否需要跳过已完成的章节
-
+        判断下一步操作：继续生成、跳过、评估扩展、还是结束
+        
         返回值：
         - "execute": 继续生成下一章
         - "skip": 下一章已存在，跳过
-        - "end": 所有章节已完成
+        - "evaluate": 需要评估剧情进度（已规划章节已完成但大纲未完整）
+        - "end": 所有章节已完成且大纲已完整
         """
         if state.current_chapter_number is None:
             return "end"
-
-        # 检查下一章是否在计划中
+        
         next_num = state.current_chapter_number + 1
-        if next_num not in state.chapters_plan:
-            return "end"
-
-        # 检查下一章是否已生成
-        if next_num in state.chapters:
-            chapter = state.chapters[next_num]
-            if chapter.scenes and len(chapter.scenes) > 0:
-                print(f"  ⏭️ 第 {next_num} 章已生成，跳过")
-                return "skip"
-
-        return "execute"
+        
+        # 检查下一章是否在计划中
+        if next_num in state.chapters_plan:
+            # 下一章已有计划，检查是否已生成
+            if next_num in state.chapters:
+                chapter = state.chapters[next_num]
+                if chapter.scenes and len(chapter.scenes) > 0:
+                    print(f"  ⏭️ 第 {next_num} 章已生成，跳过")
+                    return "skip"
+            return "execute"
+        
+        # 下一章不在计划中，检查是否需要扩展大纲
+        if state.outline and not state.outline.is_complete:
+            # 大纲未完成，需要评估是否扩展
+            print(f"  📊 已完成所有已规划章节，需要评估剧情进度")
+            return "evaluate"
+        
+        # 大纲已完成，结束生成
+        return "end"
 
     workflow.add_conditional_edges(
         "next_chapter",
-        should_continue_or_skip_generation,
+        should_evaluate_or_continue,
         {
             "execute": "chapter_generation",
             "skip": "skip_chapter_generation",
+            "evaluate": "evaluate_story_progress",
             "end": END
         }
     )
+    
+    # 条件分支 3：评估后决定是扩展还是结束
+    def should_extend_or_end(state: NovelGenerationState) -> Literal["extend", "end"]:
+        """
+        根据剧情进度评估结果决定是扩展大纲还是结束
+        
+        返回值：
+        - "extend": 扩展大纲（continue/wrap_up/force_end 都需要生成新章节）
+        - "end": 无法继续（异常情况）
+        """
+        if state.story_progress_evaluation is None:
+            print("  ⚠️ 评估结果为空，结束生成")
+            return "end"
+        
+        # 所有评估结果都需要扩展大纲（即使是 force_end 也要生成结局章节）
+        return "extend"
+    
+    workflow.add_conditional_edges(
+        "evaluate_story_progress",
+        should_extend_or_end,
+        {
+            "extend": "extend_outline",
+            "end": END
+        }
+    )
+    
+    # extend_outline → plan_new_chapters
+    workflow.add_edge("extend_outline", "plan_new_chapters")
+    
+    # plan_new_chapters → init_chapter_loop（重新初始化章节循环以处理新章节）
+    workflow.add_edge("plan_new_chapters", "init_chapter_loop")
     
     # 配置 checkpointer
     # 如果提供了 project_dir，使用 SqliteSaver 持久化检查点
@@ -393,6 +460,66 @@ def visualize_workflow(workflow_app, output_format: str = "mermaid") -> str:
             return f"# 无法生成 Mermaid 图\n错误: {str(e)}"
     else:
         return f"不支持的格式: {output_format}"
+
+
+# ==================== 场景生成子工作流 ====================
+
+def create_scene_generation_subgraph():
+    """
+    创建场景生成子工作流
+    
+    子工作流结构:
+    - init_scene_loop: 初始化场景循环
+    - [条件边] should_generate_scene:
+        - "skip" → skip_scene → next_scene
+        - "execute" → retrieve_memory → generate_scene → save_scene → next_scene
+    - [条件边] has_more_scenes:
+        - "continue" → init_scene_loop（回到条件判断）
+        - "end" → END
+    
+    注意：子图不设置 checkpointer，由父图自动传播。
+    
+    开发者: jamesenh, 开发时间: 2025-11-28
+    """
+    builder = StateGraph(SceneGenerationState)
+    
+    # 添加节点
+    builder.add_node("init_scene_loop", init_scene_loop_node)
+    builder.add_node("retrieve_memory", retrieve_scene_memory_node)
+    builder.add_node("generate_scene", generate_scene_node)
+    builder.add_node("save_scene", save_scene_node)
+    builder.add_node("next_scene", next_scene_node)
+    builder.add_node("skip_scene", skip_scene_node)
+    
+    # 定义边
+    builder.add_edge(START, "init_scene_loop")
+    
+    # init_scene_loop → [条件边] should_generate_scene
+    builder.add_conditional_edges(
+        "init_scene_loop",
+        should_generate_scene,
+        {"skip": "skip_scene", "execute": "retrieve_memory"}
+    )
+    
+    # 生成流程
+    builder.add_edge("retrieve_memory", "generate_scene")
+    builder.add_edge("generate_scene", "save_scene")
+    builder.add_edge("save_scene", "next_scene")
+    builder.add_edge("skip_scene", "next_scene")
+    
+    # next_scene → [条件边] has_more_scenes
+    builder.add_conditional_edges(
+        "next_scene",
+        has_more_scenes,
+        {"continue": "init_scene_loop", "end": END}  # 回到 init_scene_loop 以触发条件判断
+    )
+    
+    # 注意：不传 checkpointer，由父图传播
+    return builder.compile()
+
+
+# 创建全局子图实例（供 scene_generation_wrapper_node 使用）
+scene_generation_subgraph = create_scene_generation_subgraph()
 
 
 # 注意：不再提供默认工作流实例，因为需要 project_dir 参数来启用持久化

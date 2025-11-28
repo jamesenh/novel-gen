@@ -103,12 +103,17 @@ python main.py
 **Mem0 LLM 配置**（用于记忆处理）：
 
 > **重要**：Mem0 内部使用 LLM 来处理记忆（提取事实、合并、去重等）。如果不配置，将使用 Mem0 的默认模型 `gpt-4.1-nano-2025-04-14`。
+>
+> **⚠️ 建议**：如果主创作流程使用第三方模型（如阿里云 Qwen），建议为 Mem0 单独配置 OpenAI 模型（如 `gpt-4o-mini`），因为 Mem0 的记忆处理需要稳定的 JSON 输出。
 
 | 变量名 | 描述 | 默认值 |
 |--------|------|--------|
 | `MEM0_LLM_MODEL_NAME` | Mem0 LLM 模型名称 | 使用 `OPENAI_MODEL_NAME` |
 | `MEM0_LLM_API_KEY` | Mem0 LLM API Key | 使用 `OPENAI_API_KEY` |
 | `MEM0_LLM_BASE_URL` | Mem0 LLM API 端点 | 使用 `OPENAI_BASE_URL` |
+| `MEM0_LLM_TEMPERATURE` | LLM 温度参数（建议 0.0 以获得稳定 JSON） | `0.0` |
+| `MEM0_LLM_MAX_TOKENS` | LLM 最大 token 数 | `2000` |
+| `MEM0_LOG_LEVEL` | Mem0 日志级别（抑制非致命错误） | `WARNING` |
 
 ### 高级配置
 
@@ -130,7 +135,7 @@ config.mem0_config = Mem0Config(
     llm_model_name="gpt-4o-mini",               # Mem0 LLM 模型
     llm_api_key="your_api_key",                 # LLM API Key
     llm_base_url="https://api.openai.com/v1",   # LLM API 端点
-    llm_temperature=0.1,                         # LLM 温度（建议较低值）
+    llm_temperature=0.0,                         # LLM 温度（0.0 获得稳定 JSON）
     llm_max_tokens=2000,                         # LLM 最大 token 数
 )
 ```
@@ -321,6 +326,45 @@ Mem0InitializationError: Embedding API Key 未设置
 1. 增加 `timeout` 配置
 2. 检查网络连接
 3. 检查 API 配额
+
+### JSON 解析错误（Invalid JSON response）
+
+**症状**：
+```
+Invalid JSON response: Unterminated string starting at: line 217 column 19 (char 5496)
+```
+
+**原因**：
+这是 Mem0 内部在处理记忆时调用 LLM 返回的 JSON 格式不稳定导致的。常见于使用第三方模型（如 Qwen）作为 Mem0 的 LLM。
+
+**解决方案**：
+
+1. **为 Mem0 单独配置稳定的模型**（推荐）：
+   ```bash
+   # 主创作流程使用其他模型
+   OPENAI_BASE_URL=https://api-inference.modelscope.cn/v1
+   OPENAI_MODEL_NAME=Qwen/Qwen3-235B-A22B
+   
+   # Mem0 单独使用 OpenAI 官方模型
+   MEM0_LLM_MODEL_NAME=gpt-4o-mini
+   MEM0_LLM_BASE_URL=           # 留空使用 OpenAI 官方 API
+   MEM0_LLM_API_KEY=sk-your-openai-key
+   ```
+
+2. **降低 LLM 温度**：
+   ```bash
+   MEM0_LLM_TEMPERATURE=0.0
+   ```
+
+3. **抑制日志输出**（如果不影响主流程）：
+   ```bash
+   MEM0_LOG_LEVEL=WARNING
+   ```
+
+**说明**：
+- 这些错误通常不会中断主流程（Mem0 使用优雅降级策略）
+- 但会影响智能记忆管理功能（如自动合并、去重、冲突解决）
+- 基础的向量存储功能不受影响
 
 ## 常见问题
 

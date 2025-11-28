@@ -205,6 +205,10 @@ class ProjectConfig(BaseModel):
                 request_timeout = int(os.getenv("MEM0_REQUEST_TIMEOUT", "30"))
                 max_retries = int(os.getenv("MEM0_MAX_RETRIES", "3"))
                 retry_backoff_factor = float(os.getenv("MEM0_RETRY_BACKOFF_FACTOR", "2.0"))
+                
+                # 读取 LLM 相关的环境变量（温度默认 0.0 以获得更稳定的 JSON 输出）
+                llm_temperature = float(os.getenv("MEM0_LLM_TEMPERATURE", "0.0"))
+                llm_max_tokens = int(os.getenv("MEM0_LLM_MAX_TOKENS", "2000"))
 
                 self.mem0_config = Mem0Config(
                     enabled=True,
@@ -215,6 +219,8 @@ class ProjectConfig(BaseModel):
                     llm_model_name=os.getenv("MEM0_LLM_MODEL_NAME") or os.getenv("OPENAI_MODEL_NAME"),
                     llm_api_key=os.getenv("MEM0_LLM_API_KEY") or os.getenv("OPENAI_API_KEY"),
                     llm_base_url=os.getenv("MEM0_LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL") or os.getenv("OPENAI_API_BASE"),
+                    llm_temperature=llm_temperature,
+                    llm_max_tokens=llm_max_tokens,
                     # 重试配置
                     request_timeout=request_timeout,
                     max_retries=max_retries,

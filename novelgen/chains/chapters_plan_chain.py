@@ -9,7 +9,7 @@ from novelgen.llm import get_llm, get_structured_llm
 from novelgen.chains.output_fixing import LLMJsonRepairOutputParser
 
 
-def create_chapter_plan_chain(verbose: bool = False, llm_config=None):
+def create_chapter_plan_chain(verbose: bool = False, llm_config=None, show_prompt: bool = True):
     """创建章节计划生成链
     
     优先使用 structured_output 模式，否则退回传统解析路径。
@@ -19,7 +19,8 @@ def create_chapter_plan_chain(verbose: bool = False, llm_config=None):
             structured_llm = get_structured_llm(
                 pydantic_model=ChapterPlan,
                 config=llm_config,
-                verbose=verbose
+                verbose=verbose,
+                show_prompt=show_prompt
             )
             
             prompt = ChatPromptTemplate.from_messages([
@@ -71,7 +72,7 @@ def create_chapter_plan_chain(verbose: bool = False, llm_config=None):
         except Exception as e:
             print(f"⚠️  structured_output 模式初始化失败，退回传统解析路径: {e}")
     
-    llm = get_llm(config=llm_config, verbose=verbose)
+    llm = get_llm(config=llm_config, verbose=verbose, show_prompt=show_prompt)
     base_parser = PydanticOutputParser[ChapterPlan](pydantic_object=ChapterPlan)
     parser = LLMJsonRepairOutputParser[ChapterPlan](parser=base_parser, llm=llm)
 
@@ -126,7 +127,8 @@ def generate_chapter_plan(
     chapter_memory: str = "",
     chapter_dependencies: str = "",
     verbose: bool = False,
-    llm_config=None
+    llm_config=None,
+    show_prompt: bool = True
 ) -> ChapterPlan:
     """
     生成章节计划
@@ -137,11 +139,12 @@ def generate_chapter_plan(
         characters: 角色配置
         verbose: 是否输出详细日志（提示词、时间、token）
         llm_config: LLM配置
+        show_prompt: verbose 模式下是否显示完整提示词
 
     Returns:
         ChapterPlan对象
     """
-    chain = create_chapter_plan_chain(verbose=verbose, llm_config=llm_config)
+    chain = create_chapter_plan_chain(verbose=verbose, llm_config=llm_config, show_prompt=show_prompt)
     
     input_data = {
         "world_setting": world_setting.model_dump_json(indent=2),
