@@ -1,5 +1,6 @@
 # 开发者: jamesenh, 开发时间: 2025-11-17
 # 更新: 2025-11-25 - 简化记忆层架构，移除 SQLite 和独立 VectorStore，统一使用 Mem0
+# 更新: 2025-11-30 - 添加 cleanup 方法和退出调试日志
 
 """
 编排器
@@ -7,7 +8,20 @@
 """
 import os
 import json
+import time
+import threading
 from typing import Optional, Union, List, Dict, Any
+
+# 调试模式开关
+DEBUG_EXIT = os.getenv("NOVELGEN_DEBUG", "0") == "1"
+
+
+def _debug_log(msg: str):
+    """输出调试日志（仅在 DEBUG_EXIT=True 时）"""
+    if DEBUG_EXIT:
+        timestamp = time.strftime("%H:%M:%S")
+        thread_name = threading.current_thread().name
+        print(f"[{timestamp}][{thread_name}] 🔍 [orchestrator] {msg}")
 
 from novelgen.models import (
     WorldSetting, ThemeConflict, CharactersConfig,
@@ -27,8 +41,12 @@ from novelgen.runtime.summary import summarize_scene, summarize_scenes
 from novelgen.runtime.memory import generate_chapter_memory_entry
 from novelgen.runtime.consistency import run_consistency_check
 from novelgen.chains.chapter_revision_chain import revise_chapter
-from novelgen.runtime.workflow import create_novel_generation_workflow
-from novelgen.runtime.mem0_manager import Mem0Manager
+from novelgen.runtime.workflow import (
+    create_novel_generation_workflow, 
+    get_default_recursion_limit,
+    get_estimated_nodes_per_chapter
+)
+from novelgen.runtime.mem0_manager import Mem0Manager, is_shutdown_requested
 from novelgen.models import NovelGenerationState
 from datetime import datetime
 from typing import Dict as TypingDict
@@ -546,6 +564,9 @@ class NovelOrchestrator:
             if completed_steps:
                 print(f"📋 检测到已完成的步骤: {', '.join(completed_steps)}")
 
+            # 获取递归限制配置
+            recursion_limit = get_default_recursion_limit()
+            
             self._workflow_state = NovelGenerationState(
                 project_name=self.project_name,
                 project_dir=self.project_dir,
@@ -559,7 +580,11 @@ class NovelOrchestrator:
                 chapter_memories=chapter_memories,
                 completed_steps=completed_steps,
                 verbose=self.verbose,  # 传递 verbose 参数到工作流状态
-                show_prompt=self.show_prompt  # 传递 show_prompt 参数到工作流状态
+                show_prompt=self.show_prompt,  # 传递 show_prompt 参数到工作流状态
+                # 递归限制预估机制相关字段
+                recursion_limit=recursion_limit,
+                node_execution_count=0,  # 初始化为 0
+                should_stop_early=False
                 # 注意：mem0_manager 不放入状态，因为它无法被 msgpack 序列化
                 # 在 orchestrator 级别通过 self.mem0_manager 管理
             )
@@ -653,11 +678,24 @@ class NovelOrchestrator:
         initial_state = self._get_or_create_workflow_state()
         
         # 配置工作流执行
-        config = {"configurable": {"thread_id": self.project_name}}
+        # 更新: 2025-11-30 - 从状态中读取 recursion_limit 并传入 config
+        recursion_limit = initial_state.recursion_limit if initial_state else get_default_recursion_limit()
+        config = {
+            "configurable": {"thread_id": self.project_name},
+            "recursion_limit": recursion_limit
+        }
+        print(f"   递归限制: {recursion_limit}, 每章预估节点数: {get_estimated_nodes_per_chapter()}")
         
         # 运行工作流
         final_state = None
+        interrupted = False
         for state in self.workflow.stream(initial_state, config):
+            # 检查是否收到停止信号
+            if is_shutdown_requested():
+                print("⏹️ 收到停止信号，工作流中断")
+                interrupted = True
+                break
+            
             # state 是一个字典，包含节点名称和对应的状态更新
             for node_name, node_output in state.items():
                 print(f"  ✓ 节点 '{node_name}' 执行完成")
@@ -669,12 +707,19 @@ class NovelOrchestrator:
                     self._workflow_state = final_state
                     return final_state
         
+        if interrupted:
+            print("⏹️ 工作流已被用户中断")
+            self._workflow_state = final_state
+            raise KeyboardInterrupt("用户中断工作流")
+        
         print("✅ LangGraph 工作流执行完成")
         self._workflow_state = final_state
         return final_state
     
     def resume_workflow(self, checkpoint_id: Optional[str] = None) -> NovelGenerationState:
         """从检查点恢复工作流
+        
+        修复: 2025-11-30 - 在恢复前同步文件系统状态，确保场景文件能正确合并为章节
         
         Args:
             checkpoint_id: 检查点 ID（可选，默认使用最新检查点）
@@ -684,8 +729,18 @@ class NovelOrchestrator:
         """
         print(f"🔄 从检查点恢复工作流...")
         
+        # 关键修复：先检查并合并未完成的章节（从场景文件）
+        # 这处理了场景都生成了但章节文件未保存的情况
+        self._merge_incomplete_chapters_from_scenes()
+        
         # 配置工作流执行
-        config = {"configurable": {"thread_id": self.project_name}}
+        # 更新: 2025-11-30 - 从状态中读取 recursion_limit 并传入 config
+        recursion_limit = get_default_recursion_limit()
+        config = {
+            "configurable": {"thread_id": self.project_name},
+            "recursion_limit": recursion_limit
+        }
+        print(f"   递归限制: {recursion_limit}")
         
         # 获取检查点历史
         checkpoints = list(self.workflow.get_state_history(config))
@@ -699,20 +754,753 @@ class NovelOrchestrator:
         latest_checkpoint = checkpoints[0]
         print(f"  恢复检查点: {latest_checkpoint.config['configurable']['thread_id']}")
         
+        # 关键修复：从文件系统加载最新状态，与检查点状态同步
+        # 这确保了在中断后新生成的文件（如场景文件）能被正确识别
+        file_state = self._get_or_create_workflow_state()
+        
+        # 获取检查点中的状态
+        checkpoint_state = latest_checkpoint.values
+        
+        # 同步文件系统状态到检查点（文件系统状态优先，因为它反映实际生成的内容）
+        state_updates = self._sync_file_state_to_checkpoint(file_state, checkpoint_state)
+        
+        if state_updates:
+            print(f"📂 同步文件系统状态: {list(state_updates.keys())}")
+            # 使用 update_state 更新检查点状态
+            self.workflow.update_state(config, state_updates)
+        
         # 从检查点继续执行
         final_state = None
+        interrupted = False
         for state in self.workflow.stream(None, config):
+            # 检查是否收到停止信号
+            if is_shutdown_requested():
+                print("⏹️ 收到停止信号，工作流中断")
+                interrupted = True
+                break
+            
             for node_name, node_output in state.items():
                 print(f"  ✓ 节点 '{node_name}' 执行完成")
                 final_state = node_output
+        
+        if interrupted:
+            print("⏹️ 工作流已被用户中断")
+            self._workflow_state = final_state
+            raise KeyboardInterrupt("用户中断工作流")
+        
+        # 检查是否真的完成了所有工作
+        # 如果 final_state 是 None（工作流认为已经结束），需要检查是否有未完成的章节
+        if final_state is None:
+            print("⚠️ 检查点显示工作流已结束，检查是否有未完成的章节...")
+            incomplete_chapters = self._check_incomplete_chapters()
+            
+            if incomplete_chapters:
+                print(f"🔍 发现 {len(incomplete_chapters)} 个未完成的章节: {incomplete_chapters}")
+                print("📝 检查点状态已损坏，将重新运行工作流（跳过已完成章节）...")
+                
+                # 重置检查点，使用文件系统状态重新开始
+                # 先合并已有的场景文件
+                self._merge_incomplete_chapters_from_scenes()
+                
+                # 重新获取状态并运行
+                return self.run_workflow()
+            else:
+                print("✅ 所有章节已完成")
+                # 返回文件系统状态
+                final_state = self._get_or_create_workflow_state()
         
         print("✅ 工作流恢复执行完成")
         self._workflow_state = final_state
         return final_state
     
+    def _check_incomplete_chapters(self) -> List[int]:
+        """检查有哪些章节未完成
+        
+        根据文件系统状态检测：
+        1. 章节计划存在但章节JSON不存在
+        2. 场景文件数量少于计划的场景数
+        
+        Returns:
+            未完成的章节编号列表
+        """
+        import os
+        import json
+        
+        chapters_dir = os.path.join(self.project_dir, "chapters")
+        if not os.path.exists(chapters_dir):
+            return []
+        
+        incomplete = []
+        
+        # 扫描所有章节计划
+        for filename in os.listdir(chapters_dir):
+            if not filename.endswith("_plan.json"):
+                continue
+            
+            # 提取章节号
+            try:
+                ch_num = int(filename.split("_")[1])
+            except (IndexError, ValueError):
+                continue
+            
+            # 检查章节JSON是否存在
+            chapter_file = os.path.join(chapters_dir, f"chapter_{ch_num:03d}.json")
+            if not os.path.exists(chapter_file):
+                # 章节JSON不存在，检查场景文件
+                plan_file = os.path.join(chapters_dir, filename)
+                try:
+                    with open(plan_file, 'r', encoding='utf-8') as f:
+                        plan_data = json.load(f)
+                    expected_scenes = len(plan_data.get("scenes", []))
+                except Exception:
+                    expected_scenes = 0
+                
+                # 统计已有的场景文件
+                scene_files = [f for f in os.listdir(chapters_dir) 
+                              if f.startswith(f"scene_{ch_num:03d}_") and f.endswith(".json")]
+                actual_scenes = len(scene_files)
+                
+                if actual_scenes < expected_scenes:
+                    incomplete.append(ch_num)
+                    print(f"    第{ch_num}章: {actual_scenes}/{expected_scenes} 场景")
+        
+        return sorted(incomplete)
+    
+    def _sync_file_state_to_checkpoint(
+        self, 
+        file_state: NovelGenerationState, 
+        checkpoint_state: dict
+    ) -> dict:
+        """同步文件系统状态到检查点状态
+        
+        比较文件系统状态和检查点状态，返回需要更新的字段。
+        文件系统状态优先，因为它反映实际生成的内容。
+        
+        关键场景：
+        - 场景文件已生成但 chapter_XXX.json 未保存
+        - 中断后文件系统有新内容但检查点未更新
+        
+        Args:
+            file_state: 从文件系统加载的状态
+            checkpoint_state: 检查点中的状态
+            
+        Returns:
+            需要更新的状态字段字典
+        """
+        updates = {}
+        
+        # 同步 chapters：确保已生成的章节被识别
+        file_chapters = file_state.chapters or {}
+        checkpoint_chapters = checkpoint_state.get("chapters", {}) or {}
+        
+        # 检查是否有文件系统中存在但检查点中缺失的章节
+        for chapter_num, chapter in file_chapters.items():
+            if chapter_num not in checkpoint_chapters:
+                if "chapters" not in updates:
+                    updates["chapters"] = dict(checkpoint_chapters)
+                updates["chapters"][chapter_num] = chapter
+                print(f"  📖 发现新章节: 第 {chapter_num} 章")
+        
+        # 同步 chapters_plan：确保已生成的章节计划被识别
+        file_plans = file_state.chapters_plan or {}
+        checkpoint_plans = checkpoint_state.get("chapters_plan", {}) or {}
+        
+        for plan_num, plan in file_plans.items():
+            if plan_num not in checkpoint_plans:
+                if "chapters_plan" not in updates:
+                    updates["chapters_plan"] = dict(checkpoint_plans)
+                updates["chapters_plan"][plan_num] = plan
+                print(f"  📋 发现新章节计划: 第 {plan_num} 章")
+        
+        # 同步基础数据（world, theme_conflict, characters, outline）
+        # 如果文件存在但检查点中为空
+        if file_state.world and not checkpoint_state.get("world"):
+            updates["world"] = file_state.world
+            print(f"  🌍 同步世界观")
+        
+        if file_state.theme_conflict and not checkpoint_state.get("theme_conflict"):
+            updates["theme_conflict"] = file_state.theme_conflict
+            print(f"  🎭 同步主题冲突")
+        
+        if file_state.characters and not checkpoint_state.get("characters"):
+            updates["characters"] = file_state.characters
+            print(f"  👥 同步角色配置")
+        
+        if file_state.outline and not checkpoint_state.get("outline"):
+            updates["outline"] = file_state.outline
+            print(f"  📑 同步大纲")
+        
+        # 同步 completed_steps：基于文件状态更新已完成步骤
+        file_completed = set(file_state.completed_steps or [])
+        checkpoint_completed = set(checkpoint_state.get("completed_steps", []) or [])
+        
+        new_completed = file_completed - checkpoint_completed
+        if new_completed:
+            updates["completed_steps"] = list(file_completed | checkpoint_completed)
+            print(f"  ✅ 同步已完成步骤: {new_completed}")
+        
+        return updates
+    
+    def _merge_incomplete_chapters_from_scenes(self) -> None:
+        """检查并合并未完成的章节（从场景文件）
+        
+        遍历项目目录，查找存在场景文件但缺少章节文件的情况，
+        自动合并场景为完整章节。
+        
+        这是一个额外的安全措施，确保即使检查点同步失败，
+        场景文件也能被正确合并。
+        
+        开发者: jamesenh, 开发时间: 2025-11-30
+        """
+        import re
+        
+        if not os.path.exists(self.config.chapters_dir):
+            return
+        
+        # 扫描场景文件，按章节分组
+        scene_pattern = re.compile(r"scene_(\d{3})_(\d{3})\.json")
+        scenes_by_chapter: Dict[int, List[int]] = {}
+        
+        for filename in os.listdir(self.config.chapters_dir):
+            match = scene_pattern.match(filename)
+            if match:
+                chapter_num = int(match.group(1))
+                scene_num = int(match.group(2))
+                if chapter_num not in scenes_by_chapter:
+                    scenes_by_chapter[chapter_num] = []
+                scenes_by_chapter[chapter_num].append(scene_num)
+        
+        # 加载大纲以获取章节计划
+        outline = self.load_json(self.config.outline_file, Outline)
+        if not outline:
+            return
+        
+        # 检查每个有场景文件的章节
+        for chapter_num, scene_nums in scenes_by_chapter.items():
+            chapter_file = os.path.join(
+                self.config.chapters_dir, 
+                f"chapter_{chapter_num:03d}.json"
+            )
+            
+            # 如果章节文件已存在，跳过
+            if os.path.exists(chapter_file):
+                continue
+            
+            # 加载章节计划
+            plan_file = os.path.join(
+                self.config.chapters_dir,
+                f"chapter_{chapter_num:03d}_plan.json"
+            )
+            if not os.path.exists(plan_file):
+                continue
+            
+            plan = self.load_json(plan_file, ChapterPlan)
+            if not plan:
+                continue
+            
+            # 检查是否所有场景都已生成
+            expected_scenes = {s.scene_number for s in plan.scenes}
+            existing_scenes = set(scene_nums)
+            
+            if expected_scenes <= existing_scenes:
+                # 所有场景都存在，合并为章节
+                print(f"🔧 发现未合并的章节: 第 {chapter_num} 章，正在合并...")
+                
+                scenes = []
+                for scene_plan in plan.scenes:
+                    scene_file = os.path.join(
+                        self.config.chapters_dir,
+                        f"scene_{chapter_num:03d}_{scene_plan.scene_number:03d}.json"
+                    )
+                    scene = self.load_json(scene_file, GeneratedScene)
+                    if scene:
+                        scenes.append(scene)
+                
+                if scenes:
+                    chapter = GeneratedChapter(
+                        chapter_number=chapter_num,
+                        chapter_title=plan.chapter_title,
+                        scenes=scenes,
+                        total_words=sum(s.word_count for s in scenes)
+                    )
+                    self.save_json(chapter, chapter_file)
+                    print(f"  ✅ 第 {chapter_num} 章已合并: {chapter_file}")
+    
     def close(self):
         """关闭资源（预留接口，Mem0 不需要显式关闭）"""
         pass
+
+    # ==================== 状态查询和回滚方法 ====================
+    # 开发者: jamesenh, 开发时间: 2025-11-30
+    
+    def get_project_state(self) -> Dict[str, Any]:
+        """获取项目完整状态
+        
+        用于 CLI 展示项目当前进度和可回滚点
+        
+        Returns:
+            包含以下结构的字典：
+            {
+                "steps": {
+                    "world": {"exists": True, "file": "world.json"},
+                    "theme_conflict": {"exists": True, "file": "theme_conflict.json"},
+                    "characters": {"exists": True, "file": "characters.json"},
+                    "outline": {"exists": True, "file": "outline.json", "chapters": 12},
+                },
+                "chapters": {
+                    1: {"plan": True, "scenes": [1,2,3,4], "complete": True, "word_count": 3200},
+                    2: {"plan": True, "scenes": [1,2,3], "complete": False},
+                    3: {"plan": True, "scenes": [], "complete": False},
+                },
+                "checkpoint_exists": True
+            }
+        """
+        import re
+        
+        state = {
+            "steps": {},
+            "chapters": {},
+            "checkpoint_exists": False
+        }
+        
+        # 检查基础步骤文件
+        state["steps"]["world"] = {
+            "exists": os.path.exists(self.config.world_file),
+            "file": "world.json"
+        }
+        state["steps"]["theme_conflict"] = {
+            "exists": os.path.exists(self.config.theme_conflict_file),
+            "file": "theme_conflict.json"
+        }
+        state["steps"]["characters"] = {
+            "exists": os.path.exists(self.config.characters_file),
+            "file": "characters.json"
+        }
+        
+        outline_exists = os.path.exists(self.config.outline_file)
+        state["steps"]["outline"] = {
+            "exists": outline_exists,
+            "file": "outline.json",
+            "chapters": 0
+        }
+        
+        if outline_exists:
+            outline = self.load_json(self.config.outline_file, Outline)
+            if outline:
+                state["steps"]["outline"]["chapters"] = len(outline.chapters)
+        
+        # 检查检查点数据库
+        checkpoint_db = os.path.join(self.project_dir, "workflow_checkpoints.db")
+        state["checkpoint_exists"] = os.path.exists(checkpoint_db)
+        
+        # 检查章节状态
+        if os.path.exists(self.config.chapters_dir):
+            # 收集所有章节计划
+            plan_pattern = re.compile(r"chapter_(\d{3})_plan\.json")
+            # 收集所有场景文件
+            scene_pattern = re.compile(r"scene_(\d{3})_(\d{3})\.json")
+            # 收集所有章节文件
+            chapter_pattern = re.compile(r"chapter_(\d{3})\.json")
+            
+            plans = {}
+            scenes_by_chapter: Dict[int, List[int]] = {}
+            completed_chapters = {}
+            
+            for filename in os.listdir(self.config.chapters_dir):
+                # 章节计划
+                plan_match = plan_pattern.match(filename)
+                if plan_match:
+                    chapter_num = int(plan_match.group(1))
+                    plan_file = os.path.join(self.config.chapters_dir, filename)
+                    plan = self.load_json(plan_file, ChapterPlan)
+                    if plan:
+                        plans[chapter_num] = len(plan.scenes)
+                    continue
+                
+                # 场景文件
+                scene_match = scene_pattern.match(filename)
+                if scene_match:
+                    chapter_num = int(scene_match.group(1))
+                    scene_num = int(scene_match.group(2))
+                    if chapter_num not in scenes_by_chapter:
+                        scenes_by_chapter[chapter_num] = []
+                    scenes_by_chapter[chapter_num].append(scene_num)
+                    continue
+                
+                # 完整章节文件
+                chapter_match = chapter_pattern.match(filename)
+                if chapter_match:
+                    chapter_num = int(chapter_match.group(1))
+                    chapter_file = os.path.join(self.config.chapters_dir, filename)
+                    chapter = self.load_json(chapter_file, GeneratedChapter)
+                    if chapter:
+                        completed_chapters[chapter_num] = {
+                            "word_count": chapter.total_words,
+                            "scene_count": len(chapter.scenes)
+                        }
+            
+            # 构建章节状态
+            all_chapter_nums = set(plans.keys()) | set(scenes_by_chapter.keys()) | set(completed_chapters.keys())
+            
+            for ch_num in sorted(all_chapter_nums):
+                chapter_state = {
+                    "plan": ch_num in plans,
+                    "plan_scenes": plans.get(ch_num, 0),
+                    "scenes": sorted(scenes_by_chapter.get(ch_num, [])),
+                    "complete": ch_num in completed_chapters,
+                    "word_count": completed_chapters.get(ch_num, {}).get("word_count", 0)
+                }
+                state["chapters"][ch_num] = chapter_state
+        
+        return state
+    
+    def _delete_checkpoint_db(self) -> bool:
+        """删除 LangGraph 检查点数据库
+        
+        删除后，下次运行时系统会从文件状态自动重建
+        
+        Returns:
+            是否成功删除
+        """
+        checkpoint_db = os.path.join(self.project_dir, "workflow_checkpoints.db")
+        if os.path.exists(checkpoint_db):
+            try:
+                os.remove(checkpoint_db)
+                print(f"  🗑️ 已删除检查点数据库: {checkpoint_db}")
+                return True
+            except Exception as e:
+                print(f"  ⚠️ 删除检查点数据库失败: {e}")
+                return False
+        return True
+    
+    def _update_chapter_memory_file(self, chapter_gte: int) -> int:
+        """更新章节记忆文件，移除指定章节及之后的条目
+        
+        Args:
+            chapter_gte: 移除章节号 >= 此值的条目
+            
+        Returns:
+            移除的条目数量
+        """
+        entries = self._load_chapter_memory_entries()
+        original_count = len(entries)
+        
+        filtered_entries = [e for e in entries if e.chapter_number < chapter_gte]
+        removed_count = original_count - len(filtered_entries)
+        
+        if removed_count > 0:
+            self._save_chapter_memory_entries(filtered_entries)
+            print(f"  🗑️ 从章节记忆中移除 {removed_count} 条条目")
+        
+        return removed_count
+    
+    def _update_consistency_reports(self, chapter_gte: int) -> int:
+        """更新一致性报告文件，移除指定章节及之后的条目
+        
+        Args:
+            chapter_gte: 移除章节号 >= 此值的条目
+            
+        Returns:
+            移除的条目数量
+        """
+        if not os.path.exists(self.config.consistency_report_file):
+            return 0
+        
+        try:
+            with open(self.config.consistency_report_file, 'r', encoding='utf-8') as f:
+                reports = json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            return 0
+        
+        original_count = len(reports)
+        filtered_reports = [r for r in reports if r.get("chapter_number", 0) < chapter_gte]
+        removed_count = original_count - len(filtered_reports)
+        
+        if removed_count > 0:
+            with open(self.config.consistency_report_file, 'w', encoding='utf-8') as f:
+                json.dump(filtered_reports, f, ensure_ascii=False, indent=2)
+            print(f"  🗑️ 从一致性报告中移除 {removed_count} 条条目")
+        
+        return removed_count
+    
+    def rollback_to_step(self, step_name: str) -> Dict[str, Any]:
+        """回滚到指定步骤之前
+        
+        步骤顺序: world -> theme_conflict -> characters -> outline -> chapters_plan
+        
+        Args:
+            step_name: 要回滚到的步骤名称
+            
+        Returns:
+            回滚结果：{"deleted_files": [...], "deleted_memories": int}
+        """
+        import shutil
+        
+        # 步骤顺序定义
+        step_order = ["world", "theme_conflict", "characters", "outline", "chapters_plan"]
+        
+        if step_name not in step_order:
+            raise ValueError(f"无效的步骤名称: {step_name}，有效值: {step_order}")
+        
+        step_index = step_order.index(step_name)
+        steps_to_delete = step_order[step_index:]
+        
+        result = {
+            "deleted_files": [],
+            "deleted_memories": 0
+        }
+        
+        print(f"🔄 回滚到步骤 '{step_name}' 之前...")
+        
+        # 删除各步骤对应的文件
+        step_files = {
+            "world": self.config.world_file,
+            "theme_conflict": self.config.theme_conflict_file,
+            "characters": self.config.characters_file,
+            "outline": self.config.outline_file,
+        }
+        
+        for step in steps_to_delete:
+            if step in step_files:
+                filepath = step_files[step]
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                    result["deleted_files"].append(filepath)
+                    print(f"  🗑️ 已删除: {filepath}")
+        
+        # 如果回滚到 outline 或更早，需要删除整个 chapters 目录
+        if step_index <= step_order.index("outline"):
+            if os.path.exists(self.config.chapters_dir):
+                # 统计文件数量
+                file_count = len([f for f in os.listdir(self.config.chapters_dir) if os.path.isfile(os.path.join(self.config.chapters_dir, f))])
+                shutil.rmtree(self.config.chapters_dir)
+                os.makedirs(self.config.chapters_dir, exist_ok=True)
+                result["deleted_files"].append(f"chapters/* ({file_count} 文件)")
+                print(f"  🗑️ 已清空 chapters 目录 ({file_count} 文件)")
+            
+            # 清理章节记忆
+            self._update_chapter_memory_file(chapter_gte=1)
+            
+            # 清理一致性报告
+            self._update_consistency_reports(chapter_gte=1)
+            
+            # 清理 Mem0 记忆
+            if self.mem0_manager:
+                try:
+                    deleted = self.mem0_manager.delete_memories_by_filter(chapter_index_gte=1)
+                    result["deleted_memories"] = deleted
+                except Exception as e:
+                    print(f"  ⚠️ 清理 Mem0 记忆失败: {e}")
+        
+        # 删除检查点数据库
+        self._delete_checkpoint_db()
+        
+        print(f"✅ 回滚完成: 删除 {len(result['deleted_files'])} 个文件/目录，{result['deleted_memories']} 条记忆")
+        return result
+    
+    def rollback_to_chapter(self, chapter_number: int) -> Dict[str, Any]:
+        """回滚到指定章节开始之前
+        
+        删除指定章节及之后的所有章节和场景文件
+        
+        Args:
+            chapter_number: 章节号（删除此章节及之后的所有内容）
+            
+        Returns:
+            回滚结果：{"deleted_files": [...], "deleted_memories": int}
+        """
+        import re
+        
+        result = {
+            "deleted_files": [],
+            "deleted_memories": 0
+        }
+        
+        print(f"🔄 回滚到第 {chapter_number} 章之前...")
+        
+        if not os.path.exists(self.config.chapters_dir):
+            print("  ⚠️ chapters 目录不存在")
+            return result
+        
+        # 定义文件匹配模式
+        chapter_pattern = re.compile(r"chapter_(\d{3})(?:_plan)?\.json")
+        scene_pattern = re.compile(r"scene_(\d{3})_(\d{3})\.json")
+        revision_pattern = re.compile(r"chapter_(\d{3})_revision\.json")
+        revised_txt_pattern = re.compile(r"chapter_(\d{3})_revised\.txt")
+        
+        files_to_delete = []
+        
+        for filename in os.listdir(self.config.chapters_dir):
+            filepath = os.path.join(self.config.chapters_dir, filename)
+            
+            # 检查章节文件和计划文件
+            chapter_match = chapter_pattern.match(filename)
+            if chapter_match:
+                ch_num = int(chapter_match.group(1))
+                if ch_num >= chapter_number:
+                    files_to_delete.append(filepath)
+                continue
+            
+            # 检查场景文件
+            scene_match = scene_pattern.match(filename)
+            if scene_match:
+                ch_num = int(scene_match.group(1))
+                if ch_num >= chapter_number:
+                    files_to_delete.append(filepath)
+                continue
+            
+            # 检查修订文件
+            revision_match = revision_pattern.match(filename)
+            if revision_match:
+                ch_num = int(revision_match.group(1))
+                if ch_num >= chapter_number:
+                    files_to_delete.append(filepath)
+                continue
+            
+            # 检查修订文本文件
+            revised_match = revised_txt_pattern.match(filename)
+            if revised_match:
+                ch_num = int(revised_match.group(1))
+                if ch_num >= chapter_number:
+                    files_to_delete.append(filepath)
+        
+        # 删除文件
+        for filepath in files_to_delete:
+            try:
+                os.remove(filepath)
+                result["deleted_files"].append(filepath)
+                print(f"  🗑️ 已删除: {os.path.basename(filepath)}")
+            except Exception as e:
+                print(f"  ⚠️ 删除失败 {filepath}: {e}")
+        
+        # 清理章节记忆
+        self._update_chapter_memory_file(chapter_gte=chapter_number)
+        
+        # 清理一致性报告
+        self._update_consistency_reports(chapter_gte=chapter_number)
+        
+        # 清理 Mem0 记忆
+        if self.mem0_manager:
+            try:
+                deleted = self.mem0_manager.delete_memories_by_filter(chapter_index_gte=chapter_number)
+                result["deleted_memories"] = deleted
+            except Exception as e:
+                print(f"  ⚠️ 清理 Mem0 记忆失败: {e}")
+        
+        # 删除检查点数据库
+        self._delete_checkpoint_db()
+        
+        print(f"✅ 回滚完成: 删除 {len(result['deleted_files'])} 个文件，{result['deleted_memories']} 条记忆")
+        return result
+    
+    def rollback_to_scene(self, chapter_number: int, scene_number: int) -> Dict[str, Any]:
+        """回滚到指定场景开始之前
+        
+        删除指定章节中指定场景及之后的所有场景文件，
+        同时删除章节合并文件和所有后续章节
+        
+        Args:
+            chapter_number: 章节号
+            scene_number: 场景号（删除此场景及之后的所有内容）
+            
+        Returns:
+            回滚结果：{"deleted_files": [...], "deleted_memories": int}
+        """
+        import re
+        
+        result = {
+            "deleted_files": [],
+            "deleted_memories": 0
+        }
+        
+        print(f"🔄 回滚到第 {chapter_number} 章第 {scene_number} 场景之前...")
+        
+        if not os.path.exists(self.config.chapters_dir):
+            print("  ⚠️ chapters 目录不存在")
+            return result
+        
+        # 定义文件匹配模式
+        chapter_pattern = re.compile(r"chapter_(\d{3})\.json")
+        chapter_plan_pattern = re.compile(r"chapter_(\d{3})_plan\.json")
+        scene_pattern = re.compile(r"scene_(\d{3})_(\d{3})\.json")
+        revision_pattern = re.compile(r"chapter_(\d{3})_revision\.json")
+        
+        files_to_delete = []
+        
+        for filename in os.listdir(self.config.chapters_dir):
+            filepath = os.path.join(self.config.chapters_dir, filename)
+            
+            # 检查章节文件（合并后的完整章节）
+            chapter_match = chapter_pattern.match(filename)
+            if chapter_match:
+                ch_num = int(chapter_match.group(1))
+                # 删除当前章节及之后的章节文件
+                if ch_num >= chapter_number:
+                    files_to_delete.append(filepath)
+                continue
+            
+            # 检查章节计划文件
+            plan_match = chapter_plan_pattern.match(filename)
+            if plan_match:
+                ch_num = int(plan_match.group(1))
+                # 只删除后续章节的计划，当前章节计划保留
+                if ch_num > chapter_number:
+                    files_to_delete.append(filepath)
+                continue
+            
+            # 检查场景文件
+            scene_match = scene_pattern.match(filename)
+            if scene_match:
+                ch_num = int(scene_match.group(1))
+                sc_num = int(scene_match.group(2))
+                
+                # 删除后续章节的所有场景
+                if ch_num > chapter_number:
+                    files_to_delete.append(filepath)
+                # 删除当前章节中 >= scene_number 的场景
+                elif ch_num == chapter_number and sc_num >= scene_number:
+                    files_to_delete.append(filepath)
+                continue
+            
+            # 检查修订文件
+            revision_match = revision_pattern.match(filename)
+            if revision_match:
+                ch_num = int(revision_match.group(1))
+                if ch_num >= chapter_number:
+                    files_to_delete.append(filepath)
+        
+        # 删除文件
+        for filepath in files_to_delete:
+            try:
+                os.remove(filepath)
+                result["deleted_files"].append(filepath)
+                print(f"  🗑️ 已删除: {os.path.basename(filepath)}")
+            except Exception as e:
+                print(f"  ⚠️ 删除失败 {filepath}: {e}")
+        
+        # 清理章节记忆（从当前章节开始清理）
+        self._update_chapter_memory_file(chapter_gte=chapter_number)
+        
+        # 清理一致性报告
+        self._update_consistency_reports(chapter_gte=chapter_number)
+        
+        # 清理 Mem0 记忆（精确到场景）
+        if self.mem0_manager:
+            try:
+                deleted = self.mem0_manager.delete_memories_by_filter(
+                    chapter_index_gte=chapter_number,
+                    scene_index_gte=scene_number,
+                    target_chapter_for_scene=chapter_number
+                )
+                result["deleted_memories"] = deleted
+            except Exception as e:
+                print(f"  ⚠️ 清理 Mem0 记忆失败: {e}")
+        
+        # 删除检查点数据库
+        self._delete_checkpoint_db()
+        
+        print(f"✅ 回滚完成: 删除 {len(result['deleted_files'])} 个文件，{result['deleted_memories']} 条记忆")
+        return result
 
     def _maybe_use_existing(self, filepath: str, model_class, force: bool, entity_name: str):
         """
@@ -1465,3 +2253,44 @@ class NovelOrchestrator:
 
         # 导出
         export_all_chapters_to_txt(self.project_dir, output_path)
+
+    def cleanup(self):
+        """清理资源，关闭所有连接
+        
+        在程序退出前调用，确保：
+        1. Mem0/ChromaDB 客户端正确关闭
+        2. SQLite 连接关闭
+        3. 后台线程终止
+        
+        开发者: jamesenh, 开发时间: 2025-11-30
+        """
+        _debug_log("cleanup() 开始")
+        
+        # 1. 关闭 Mem0 管理器
+        if self.mem0_manager is not None:
+            _debug_log("关闭 Mem0 管理器...")
+            start = time.time()
+            try:
+                self.mem0_manager.close()
+                _debug_log(f"Mem0 关闭完成，耗时 {time.time() - start:.2f}s")
+            except Exception as e:
+                _debug_log(f"Mem0 关闭失败: {e}")
+        
+        # 2. 关闭工作流（SQLite 连接）
+        if self.workflow is not None:
+            _debug_log("关闭工作流...")
+            start = time.time()
+            try:
+                # LangGraph 的 checkpointer 可能持有 SQLite 连接
+                # 尝试获取并关闭
+                if hasattr(self.workflow, 'checkpointer'):
+                    checkpointer = self.workflow.checkpointer
+                    if hasattr(checkpointer, 'conn'):
+                        _debug_log("关闭 SQLite 连接...")
+                        checkpointer.conn.close()
+                        _debug_log("SQLite 连接已关闭")
+                _debug_log(f"工作流关闭完成，耗时 {time.time() - start:.2f}s")
+            except Exception as e:
+                _debug_log(f"工作流关闭失败: {e}")
+        
+        _debug_log("cleanup() 完成")

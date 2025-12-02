@@ -31,7 +31,11 @@ dependencies = [
     "chromadb>=1.3.4",
     "mem0ai>=0.1.0",
     "pytest>=9.0.1",
+    "typer>=0.9.0",
 ]
+
+[project.scripts]
+ng = "novelgen.cli:app"
 
 [project.urls]
 Homepage = "https://github.com/jamesenh/novel-gen"

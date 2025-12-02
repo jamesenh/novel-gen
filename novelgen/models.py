@@ -313,6 +313,8 @@ class Mem0Config(BaseModel):
     request_timeout: int = Field(default=30, description="请求超时时间（秒）")
     max_retries: int = Field(default=3, description="最大重试次数")
     retry_backoff_factor: float = Field(default=2.0, description="重试指数退避因子")
+    # 并行处理配置
+    parallel_workers: int = Field(default=5, description="场景内容保存的并行工作线程数")
 
 
 class UserPreference(BaseModel):
@@ -334,6 +336,7 @@ class NovelGenerationState(BaseModel):
     开发者: jamesenh, 开发时间: 2025-11-21
     更新: 2025-11-25 - 移除 db_manager/vector_manager，使用 mem0_manager
     更新: 2025-11-28 - 添加 story_progress_evaluation 支持动态章节扩展
+    更新: 2025-11-30 - 添加 node_execution_count 和 recursion_limit 支持递归限制预估
     """
     # 项目元信息
     project_name: str = Field(description="项目名称")
@@ -370,6 +373,21 @@ class NovelGenerationState(BaseModel):
     completed_steps: List[str] = Field(default_factory=list, description="已完成步骤列表")
     failed_steps: List[str] = Field(default_factory=list, description="失败步骤列表")
     error_messages: Dict[str, str] = Field(default_factory=dict, description="错误消息（步骤 -> 错误信息）")
+    
+    # 递归限制预估机制
+    # 更新: 2025-11-30 - 用于在接近递归限制时主动停止，避免 GraphRecursionError
+    node_execution_count: int = Field(
+        default=0, 
+        description="节点执行计数，每个节点执行后 +1，用于预估剩余可用步数"
+    )
+    recursion_limit: int = Field(
+        default=500, 
+        description="递归限制（从环境变量 LANGGRAPH_RECURSION_LIMIT 读取，默认 500）"
+    )
+    should_stop_early: bool = Field(
+        default=False,
+        description="是否因递归限制预估不足而主动停止"
+    )
     
     # 运行时配置
     verbose: bool = Field(default=False, description="是否启用详细日志输出（显示提示词、响应时间、token使用情况）")

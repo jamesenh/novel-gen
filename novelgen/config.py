@@ -209,6 +209,9 @@ class ProjectConfig(BaseModel):
                 # 读取 LLM 相关的环境变量（温度默认 0.0 以获得更稳定的 JSON 输出）
                 llm_temperature = float(os.getenv("MEM0_LLM_TEMPERATURE", "0.0"))
                 llm_max_tokens = int(os.getenv("MEM0_LLM_MAX_TOKENS", "2000"))
+                
+                # 读取并行处理相关的环境变量
+                parallel_workers = int(os.getenv("MEM0_PARALLEL_WORKERS", "5"))
 
                 self.mem0_config = Mem0Config(
                     enabled=True,
@@ -225,6 +228,8 @@ class ProjectConfig(BaseModel):
                     request_timeout=request_timeout,
                     max_retries=max_retries,
                     retry_backoff_factor=retry_backoff_factor,
+                    # 并行处理配置
+                    parallel_workers=parallel_workers,
                 )
 
     # 各个链的配置，设置不同的chain_name

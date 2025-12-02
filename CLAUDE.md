@@ -23,7 +23,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-NovelGen is a Chinese-language AI novel generation system built with Python and LangChain. It creates complete novels through a structured 6-step pipeline from world-building to final chapter generation.
+NovelGen is a sophisticated Chinese-language AI novel generation system built with Python, LangChain, and LangGraph. It creates complete novels through a structured 6-step pipeline from world-building to final chapter generation, with intelligent memory management and dynamic chapter expansion capabilities.
 
 ## Essential Commands
 
@@ -45,15 +45,35 @@ cp .env.template .env
 # Full novel generation demo
 python main.py
 
-# Run specific generation steps
+# CLI usage (preferred method)
+ng generate --project demo_001           # Generate complete novel
+ng resume --project demo_001 --chapter 3  # Resume from specific chapter
+ng export --project demo_001             # Export to text file
+ng list                                 # List available projects
+
+# Direct orchestrator usage
 python -m novelgen.runtime.orchestrator \
   --project projects/demo_001 \
   --steps world,characters,outline,chapters_plan,chapters
 
-# Export novel text
-python -m novelgen.runtime.export \
-  --project projects/demo_001 \
-  --output demo_001_full.txt
+# Run tests
+pytest tests/                           # Run all tests
+pytest tests/test_end_to_end.py        # Run specific test
+```
+
+### Debugging and Development
+```bash
+# Enable debug mode
+export NOVELGEN_DEBUG=1
+ng generate --project demo_001          # Shows detailed execution logs
+
+# Test individual chains
+python -c "
+from novelgen.chains.world_chain import WorldCreationChain
+chain = WorldCreationChain()
+result = chain.run({'project_name': 'test', 'world_description': 'test world'})
+print(result)
+"
 ```
 
 ## Architecture Overview
@@ -65,6 +85,12 @@ python -m novelgen.runtime.export \
 4. **Outline Generation** (`chains/outline_chain.py`) → Creates chapter structure
 5. **Chapter Planning** (`chains/chapters_plan_chain.py`) → Detailed scene breakdown
 6. **Text Generation** (`chains/scene_text_chain.py`) → Writes novel content
+
+### Advanced Workflow Features
+- **Dynamic Chapter Expansion** (`chains/story_progress_chain.py`) → Automatically evaluates story progress and expands outline
+- **Scene Generation Subgraph** → Nested workflow for fine-grained scene-level generation
+- **Revision System** (`chains/chapter_revision_chain.py`) → Iterative improvement of generated content
+- **Consistency Checking** (`runtime/consistency.py`) → Validates narrative coherence and character consistency
 
 ### Key Design Principles (from .cursor/rules/base.mdc)
 - **Graph-Based Workflow**: The novel generation pipeline is implemented as a LangGraph workflow, where each step is a node in the graph
@@ -78,13 +104,19 @@ python -m novelgen.runtime.export \
 ### Project Structure
 ```
 novelgen/
-├── chains/           # LangChain processing chains (6 steps, nodes in the graph)
+├── chains/           # LangChain processing chains (6 steps + advanced features)
 ├── runtime/          # Orchestration with LangGraph and utilities
-│   ├── orchestrator.py         # Current orchestrator (to be replaced/updated)
-│   └── workflow.py             # New LangGraph workflow definition
+│   ├── orchestrator.py         # Main orchestrator with backward compatibility
+│   ├── workflow.py             # LangGraph workflow definition
+│   ├── nodes.py                # LangGraph node implementations
+│   ├── mem0_manager.py         # Intelligent memory management
+│   ├── consistency.py          # Consistency checking utilities
+│   ├── exporter.py             # Text export functionality
+│   └── memory.py               # Memory utilities
 ├── models.py         # All Pydantic data models (including LangGraph state)
 ├── config.py         # Configuration management
-└── llm.py           # LLM initialization
+├── llm.py           # LLM initialization
+└── cli.py           # Command-line interface (ng command)
 ```
 
 ### Data Flow (LangGraph)
@@ -93,6 +125,13 @@ novelgen/
 3. Each node (chain) processes the current state and returns an updated state
 4. All outputs are still stored in `projects/{project_name}/` at appropriate stages
 5. Final export combines all chapters into single text file
+6. SQLite-based checkpointing enables interruption and resumption at any step
+
+### Memory Management (Mem0 Integration)
+- **Entity Management**: Automatic character state tracking and conflict resolution
+- **User Preferences**: Framework for learning writing style and preferences
+- **Zero Deployment**: Reuses existing ChromaDB infrastructure
+- **Backward Compatibility**: Can be disabled without affecting core functionality
 
 ## Critical Implementation Rules
 
@@ -105,6 +144,8 @@ novelgen/
 7. **LangChain 1.0+ syntax**: Use modern LangChain patterns
 8. **LangGraph 1.0+ syntax**: Use modern LangGraph patterns (StateGraph, nodes, edges)
 9. **Prompt template structure**: Must include task, input, output format (JSON schema), and notes
+10. **Checkpointing**: All workflows must support SQLite-based checkpointing for resumption
+11. **Backward compatibility**: New features must maintain compatibility with existing project structures
 
 ## Common Development Tasks
 
@@ -117,6 +158,7 @@ novelgen/
    - Add the node to the StateGraph
    - Define edges from the new node
 5. Ensure the LangGraph state model is updated if new state fields are needed
+6. Add corresponding node implementation in `runtime/nodes.py`
 
 ### Modifying Existing Chains
 1. Check current JSON schema in corresponding Pydantic model
@@ -132,11 +174,37 @@ novelgen/
 4. Update the state model if new state fields are needed for the branch
 5. Test the complete workflow with both paths
 
+### Memory Integration (Mem0)
+1. Enable Mem0 in `.env` with `MEM0_ENABLED=true`
+2. Configure memory-specific parameters in environment
+3. Use `Mem0Manager` in chains for entity tracking and user preferences
+4. Test memory functionality with `tests/test_mem0_basic.py`
+
 ### Debugging Generation Issues
 1. Check individual chain outputs in `projects/{name}/` JSON files
 2. Verify Pydantic model validation
 3. Review prompt templates for clarity
 4. Test with smaller step subsets
+5. Enable debug mode: `export NOVELGEN_DEBUG=1`
+6. Check LangGraph state persistence in SQLite checkpoints
+
+### Testing Your Changes
+```bash
+# Run the full test suite
+pytest tests/ -v
+
+# Test specific functionality
+pytest tests/test_langgraph_integration.py -v
+pytest tests/test_checkpointing.py -v
+pytest tests/test_mem0_basic.py -v
+
+# Test with specific project
+python -c "
+from novelgen.runtime.orchestrator import NovelOrchestrator
+orch = NovelOrchestrator('test_project')
+orch.run_workflow(stop_at='world_generation')
+"
+```
 
 ## Environment Requirements
 
@@ -144,3 +212,45 @@ novelgen/
 - OpenAI API key in `.env`
 - uv package manager (preferred) or pip
 - All dependencies in `pyproject.toml`
+
+### Optional Dependencies for Enhanced Features
+- **Mem0**: Set `MEM0_ENABLED=true` in `.env` for intelligent memory management
+- **Rich + Typer**: Already included for beautiful CLI interface
+- **SQLite**: Used automatically for LangGraph checkpointing
+
+### Configuration Highlights
+The `.env.template` shows extensive configuration options including:
+- Individual model settings per chain
+- Embedding model configuration for Chinese text
+- Mem0 memory management parameters
+- Request timeout and retry logic
+- Revision policies for novel improvement
+
+## Current Development State
+
+### Active Branch: `feature/langgraph-migration`
+The project is actively migrating from simple orchestration to sophisticated LangGraph workflows. Key features in development:
+
+- **Dynamic Chapter Expansion**: Automatically evaluates story progress and expands chapter count
+- **Scene-Level Generation**: Nested sub-workflows for fine-grained content generation
+- **Enhanced Memory Management**: Mem0 integration for intelligent entity tracking
+- **Improved CLI**: New `ng` command replacing manual orchestrator calls
+- **Checkpointing**: SQLite-based state persistence for reliable resumption
+
+### Migration Status
+- ✅ Core LangGraph workflow implemented
+- ✅ Checkpointing and resumption working
+- ✅ Dynamic chapter expansion functional
+- ✅ Mem0 memory layer integrated
+- ✅ CLI tool (`ng`) available
+- 🔄 Scene generation subgraph being refined
+- 🔄 Backward compatibility maintenance
+
+### Key Files to Understand for Development
+- `runtime/workflow.py` - Core LangGraph StateGraph definition
+- `runtime/nodes.py` - Node implementations wrapping the chains
+- `runtime/orchestrator.py` - Main orchestrator with backward compatibility
+- `cli.py` - New CLI interface (use `ng` command)
+- `runtime/mem0_manager.py` - Memory management integration
+
+The system represents a mature, production-ready AI novel generation platform with sophisticated orchestration, intelligent memory management, and comprehensive tooling for both developers and end users.

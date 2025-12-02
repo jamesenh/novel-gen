@@ -55,7 +55,7 @@ def create_story_progress_chain(verbose: bool = False, llm_config=None, show_pro
 - 1.0：冲突已完全解决
 
 【输出要求】
-请输出以下字段：
+请以 JSON 格式输出以下字段：
 1. evaluation_result 必须是 "continue"、"wrap_up" 或 "force_end" 之一
 2. main_conflict_progress 必须是 0.0 到 1.0 之间的浮点数
 3. unresolved_threads: 当前未解决的伏笔/支线列表
@@ -63,7 +63,8 @@ def create_story_progress_chain(verbose: bool = False, llm_config=None, show_pro
 5. recommendation: 解释你的判断理由
 
 【注意】
-- 不需要输出 current_chapter 和 remaining_chapters，这些由系统自动填充"""),
+- 不需要输出 current_chapter 和 remaining_chapters，这些由系统自动填充
+- 文本中不得出现未转义的英文双引号"""),
                 ("user", """【章节进度信息】
 当前已完成章节数：{current_chapter}
 最大允许章节数：{max_chapters}

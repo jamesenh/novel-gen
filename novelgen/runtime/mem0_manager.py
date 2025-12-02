@@ -13,6 +13,7 @@ Mem0 记忆管理器
                    search() 和 get_all() 现在返回 {"results": [...]} 而不是列表
                  - 添加超时重试机制，支持指数退避策略
 更新: 2025-11-28 - 添加 Mem0 内部警告抑制功能，避免 UPDATE 事件的警告输出干扰日志
+更新: 2025-11-30 - 添加 close() 方法和退出调试日志，帮助定位程序卡顿问题
 """
 import logging
 import uuid
@@ -20,8 +21,10 @@ import re
 import time
 import sys
 import io
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED, wait, FIRST_COMPLETED
 from contextlib import contextmanager
-from typing import List, Dict, Optional, Any, TYPE_CHECKING, TypeVar, Callable, Generator
+from typing import List, Dict, Optional, Any, TYPE_CHECKING, TypeVar, Callable, Generator, Tuple
 from datetime import datetime
 
 from novelgen.models import Mem0Config, UserPreference, EntityStateSnapshot, StoryMemoryChunk
@@ -42,6 +45,39 @@ logging.getLogger("mem0").setLevel(getattr(logging, _mem0_log_level, logging.WAR
 
 # 类型变量，用于泛型函数返回值
 T = TypeVar('T')
+
+# ==================== 全局停止事件（用于响应 Ctrl+C） ====================
+# 更新: 2025-11-29 - 添加优雅停止支持，允许中断并行任务
+
+_shutdown_event = threading.Event()
+
+
+def request_shutdown():
+    """请求停止所有并行任务
+    
+    在收到 Ctrl+C 信号时调用，通知所有工作线程停止。
+    """
+    _shutdown_event.set()
+    logger.info("⚠️ 收到停止请求，正在通知工作线程...")
+
+
+def reset_shutdown():
+    """重置停止标志
+    
+    在每次工作流运行开始时调用，确保上次的停止状态不会影响新的运行。
+    """
+    _shutdown_event.clear()
+
+
+def is_shutdown_requested() -> bool:
+    """检查是否请求停止
+    
+    工作线程应定期调用此函数检查是否需要提前退出。
+    
+    Returns:
+        bool: 如果请求停止返回 True
+    """
+    return _shutdown_event.is_set()
 
 
 def _filter_none_values(metadata: Dict[str, Any]) -> Dict[str, Any]:
@@ -181,6 +217,9 @@ class Mem0Manager:
         # 文本分块配置
         self.chunk_size = getattr(embedding_config, 'chunk_size', 500)
         self.chunk_overlap = getattr(embedding_config, 'chunk_overlap', 50)
+        
+        # 并行处理配置
+        self.parallel_workers = config.parallel_workers
         
         if config.enabled:
             self._initialize_client()
@@ -877,6 +916,107 @@ Output: {"facts": []}
         
         return chunks
     
+    def _add_single_chunk(
+        self,
+        chunk_index: int,
+        chunk_text: str,
+        total_chunks: int,
+        chapter_index: int,
+        scene_index: int,
+        content_type: str,
+        print_lock: threading.Lock
+    ) -> Tuple[int, Optional[StoryMemoryChunk]]:
+        """并行处理单个文本块的保存
+        
+        Args:
+            chunk_index: 块索引（从 0 开始）
+            chunk_text: 块文本内容
+            total_chunks: 总块数
+            chapter_index: 章节索引
+            scene_index: 场景索引
+            content_type: 内容类型
+            print_lock: 线程锁，用于同步输出
+            
+        Returns:
+            (chunk_index, StoryMemoryChunk 或 None)
+        
+        更新: 2025-11-29 - 添加停止检查，支持 Ctrl+C 中断
+        """
+        # 检查是否请求停止（响应 Ctrl+C）
+        if is_shutdown_requested():
+            with print_lock:
+                print(f"      ⏹️ 块 {chunk_index + 1}/{total_chunks} 跳过（收到停止信号）")
+            return (chunk_index, None)
+        
+        chunk_id = str(uuid.uuid4())
+        
+        # 开始日志
+        with print_lock:
+            print(f"      📦 块 {chunk_index + 1}/{total_chunks} 开始保存...")
+        
+        start_time = time.time()
+        
+        # 构造记忆文本
+        memory_text = f"[{content_type}] 章节{chapter_index}-场景{scene_index} (块{chunk_index + 1}): {chunk_text}"
+        
+        # 添加元数据
+        metadata = {
+            "chunk_id": chunk_id,
+            "project_id": self.project_id,
+            "chapter_index": chapter_index,
+            "scene_index": scene_index,
+            "content_type": content_type,
+            "chunk_index": chunk_index,
+            "timestamp": datetime.now().isoformat(),
+        }
+        
+        # 使用 agent_id 作为场景记忆的标识
+        scene_agent_id = f"{self.project_id}_scene_content"
+        
+        # 定义添加操作
+        def add_chunk_to_mem0() -> bool:
+            with _suppress_mem0_internal_warnings():
+                self.client.add(
+                    messages=[{"role": "assistant", "content": memory_text}],
+                    agent_id=scene_agent_id,
+                    metadata=metadata,
+                )
+            return True
+        
+        # 使用重试机制执行添加操作
+        operation_name = f"add_scene_chunk_{chapter_index}_{scene_index}_{chunk_index}"
+        result = self._execute_with_retry(
+            operation=add_chunk_to_mem0,
+            operation_name=operation_name,
+            graceful_degradation=True
+        )
+        
+        elapsed = time.time() - start_time
+        
+        if result is None:
+            # 失败日志
+            with print_lock:
+                print(f"      ❌ 块 {chunk_index + 1}/{total_chunks} 保存失败 ({elapsed:.1f}s)")
+            return (chunk_index, None)
+        
+        # 成功日志
+        with print_lock:
+            print(f"      ✅ 块 {chunk_index + 1}/{total_chunks} 保存完成 ({elapsed:.1f}s)")
+        
+        # 创建 StoryMemoryChunk 对象
+        chunk = StoryMemoryChunk(
+            chunk_id=chunk_id,
+            project_id=self.project_id,
+            chapter_index=chapter_index,
+            scene_index=scene_index,
+            content=chunk_text,
+            content_type=content_type,
+            embedding_id=chunk_id,
+            created_at=datetime.now()
+        )
+        
+        return (chunk_index, chunk)
+    
     def add_scene_content(
         self,
         content: str,
@@ -884,11 +1024,13 @@ Output: {"facts": []}
         scene_index: int,
         content_type: str = "scene"
     ) -> List[StoryMemoryChunk]:
-        """添加场景内容到 Mem0
+        """添加场景内容到 Mem0（并行处理）
 
-        会自动分块并存储到 Mem0 向量库中。
+        会自动分块并使用多线程并行存储到 Mem0 向量库中。
         如果遇到超时错误，会自动重试（使用指数退避策略）。
         启用优雅降级：即使保存失败，也不会中断场景生成流程。
+        
+        支持 Ctrl+C 中断：收到停止信号后会取消未完成的任务并尽快退出。
 
         Args:
             content: 场景文本内容
@@ -897,76 +1039,86 @@ Output: {"facts": []}
             content_type: 内容类型（scene, dialogue, description）
 
         Returns:
-            创建的记忆块列表（如果保存失败则返回空列表）
+            创建的记忆块列表（如果保存失败或被中断则返回空列表或部分列表）
+        
+        更新: 2025-11-29 - 添加 Ctrl+C 中断支持
         """
         self._ensure_initialized()
 
         # 分块
         text_chunks = self._chunk_text(content)
-        memory_chunks: List[StoryMemoryChunk] = []
-        failed_chunks: int = 0
-
-        for i, chunk_text in enumerate(text_chunks):
-            chunk_id = str(uuid.uuid4())
-
-            # 构造记忆文本
-            memory_text = f"[{content_type}] 章节{chapter_index}-场景{scene_index} (块{i+1}): {chunk_text}"
-
-            # 添加元数据
-            metadata = {
-                "chunk_id": chunk_id,
-                "project_id": self.project_id,
-                "chapter_index": chapter_index,
-                "scene_index": scene_index,
-                "content_type": content_type,
-                "chunk_index": i,
-                "timestamp": datetime.now().isoformat(),
-            }
-
-            # 使用 agent_id 作为场景记忆的标识（统一使用项目级 agent_id 便于搜索）
-            scene_agent_id = f"{self.project_id}_scene_content"
-
-            # 定义添加操作（用于重试机制，使用警告抑制器避免 Mem0 内部 UPDATE 警告）
-            def add_chunk_to_mem0() -> bool:
-                with _suppress_mem0_internal_warnings():
-                    self.client.add(
-                        messages=[{"role": "assistant", "content": memory_text}],
-                        agent_id=scene_agent_id,
-                        metadata=metadata,
-                    )
-                return True
-
-            # 使用重试机制执行添加操作（启用优雅降级）
-            operation_name = f"add_scene_chunk_{chapter_index}_{scene_index}_{i}"
-            result = self._execute_with_retry(
-                operation=add_chunk_to_mem0,
-                operation_name=operation_name,
-                graceful_degradation=True  # 启用优雅降级，失败不中断主流程
-            )
-
-            if result is None:
-                # 添加失败，但继续处理其他块
-                failed_chunks += 1
-                logger.warning(
-                    f"⚠️ 场景块 {i+1}/{len(text_chunks)} 保存失败，继续处理下一块"
-                )
-                continue
-
-            # 创建 StoryMemoryChunk 对象
-            chunk = StoryMemoryChunk(
-                chunk_id=chunk_id,
-                project_id=self.project_id,
-                chapter_index=chapter_index,
-                scene_index=scene_index,
-                content=chunk_text,
-                content_type=content_type,
-                embedding_id=chunk_id,
-                created_at=datetime.now()
-            )
-            memory_chunks.append(chunk)
+        
+        if not text_chunks:
+            return []
+        
+        # 检查是否已请求停止
+        if is_shutdown_requested():
+            print(f"      ⏹️ 跳过场景保存（收到停止信号）")
+            return []
+        
+        print(f"      🚀 开始并行保存 {len(text_chunks)} 个块 (并行度: {self.parallel_workers})...")
+        
+        # 用于同步输出的线程锁
+        print_lock = threading.Lock()
+        results: List[Tuple[int, Optional[StoryMemoryChunk]]] = []
+        interrupted = False
+        
+        # 使用线程池并行处理
+        try:
+            with ThreadPoolExecutor(max_workers=self.parallel_workers) as executor:
+                futures = {
+                    executor.submit(
+                        self._add_single_chunk,
+                        i, chunk_text, len(text_chunks),
+                        chapter_index, scene_index, content_type, print_lock
+                    ): i for i, chunk_text in enumerate(text_chunks)
+                }
+                
+                pending = set(futures.keys())
+                
+                # 使用超时轮询，允许检查中断信号
+                while pending:
+                    # 检查是否请求停止
+                    if is_shutdown_requested():
+                        print(f"      ⏹️ 收到停止信号，取消剩余 {len(pending)} 个任务...")
+                        interrupted = True
+                        # 取消所有未完成的 futures
+                        for f in pending:
+                            f.cancel()
+                        break
+                    
+                    # 等待任务完成，设置超时以便定期检查中断信号
+                    done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+                    
+                    for future in done:
+                        try:
+                            result = future.result()
+                            results.append(result)
+                        except Exception as e:
+                            chunk_idx = futures[future]
+                            logger.error(f"块 {chunk_idx + 1} 处理异常: {e}")
+                            results.append((chunk_idx, None))
+                            
+        except KeyboardInterrupt:
+            # 捕获 KeyboardInterrupt，设置停止标志
+            request_shutdown()
+            interrupted = True
+            print(f"      ⏹️ 收到中断信号，正在停止...")
+        
+        # 统计结果
+        memory_chunks = [r[1] for r in results if r[1] is not None]
+        failed_chunks = len(text_chunks) - len(memory_chunks)
+        
+        # 按 chunk_index 排序
+        memory_chunks.sort(key=lambda x: x.chapter_index * 1000 + (x.scene_index or 0))
 
         # 记录最终结果
-        if failed_chunks > 0:
+        if interrupted:
+            logger.warning(
+                f"⏹️ 场景内容存储被中断: 章节{chapter_index}-场景{scene_index}, "
+                f"已完成 {len(memory_chunks)}/{len(text_chunks)} 个块"
+            )
+        elif failed_chunks > 0:
             logger.warning(
                 f"⚠️ 场景内容部分存储到 Mem0: 章节{chapter_index}-场景{scene_index}, "
                 f"成功 {len(memory_chunks)}/{len(text_chunks)} 个块，失败 {failed_chunks} 个块"
@@ -1171,36 +1323,192 @@ Output: {"facts": []}
             logger.error(f"❌ 搜索记忆块失败: {e}")
             raise
     
-    def delete_chapter_memory(self, chapter_index: int) -> bool:
+    def delete_chapter_memory(self, chapter_index: int) -> int:
         """删除指定章节的所有记忆
         
         Args:
             chapter_index: 章节索引
         
         Returns:
-            是否成功删除
+            删除的记忆数量
+        """
+        return self.delete_memories_by_filter(chapter_index_gte=chapter_index, chapter_index_lte=chapter_index)
+    
+    def get_all_memories(self, limit: int = 1000) -> List[Dict[str, Any]]:
+        """获取所有场景记忆（用于过滤删除）
+        
+        Args:
+            limit: 返回结果数量上限
+            
+        Returns:
+            所有场景记忆列表
         """
         self._ensure_initialized()
         
         try:
-            # Mem0 当前不直接支持按 metadata 批量删除
-            # 需要先搜索获取所有相关记忆，然后逐个删除
-            # 这里使用 run_id 前缀匹配来实现
+            scene_agent_id = f"{self.project_id}_scene_content"
+            response = self.client.get_all(agent_id=scene_agent_id, limit=limit)
             
-            # 获取该章节所有场景的记忆
-            # 由于 Mem0 API 限制，这里只能通过 get_all 然后过滤
-            # 注意：这在大量数据时可能效率较低
+            # Mem0 v1.0.0 返回格式为 {"results": [...]}
+            if isinstance(response, dict):
+                results = response.get("results", [])
+            elif isinstance(response, list):
+                results = response
+            else:
+                logger.warning(f"⚠️ 意外的返回类型: {type(response)}")
+                results = []
             
-            logger.warning(f"删除章节 {chapter_index} 的记忆（Mem0 批量删除功能受限）")
-            
-            # 目前 Mem0 没有提供基于 metadata 的批量删除 API
-            # 可以考虑使用 run_id 来管理场景记忆的生命周期
-            # 暂时返回 True，后续可以扩展
-            
-            return True
+            logger.info(f"✅ 获取到 {len(results)} 条场景记忆")
+            return results
             
         except Exception as e:
-            logger.error(f"❌ 删除章节记忆失败: {e}")
+            logger.error(f"❌ 获取所有记忆失败: {e}")
+            raise
+    
+    def delete_memories_by_filter(
+        self,
+        chapter_index_gte: Optional[int] = None,
+        chapter_index_lte: Optional[int] = None,
+        scene_index_gte: Optional[int] = None,
+        target_chapter_for_scene: Optional[int] = None,
+    ) -> int:
+        """根据过滤条件删除记忆
+        
+        Args:
+            chapter_index_gte: 章节号 >= 此值（删除此章节及之后的记忆）
+            chapter_index_lte: 章节号 <= 此值（配合 gte 使用可限定范围）
+            scene_index_gte: 场景号 >= 此值（需配合 target_chapter_for_scene 使用）
+            target_chapter_for_scene: 场景过滤针对的章节号
+        
+        Returns:
+            删除的记忆数量
+        
+        实现逻辑：
+        1. 使用 get_all 获取所有场景记忆
+        2. 遍历 results，按 metadata 中的 chapter_index/scene_index 过滤
+        3. 对匹配的记忆调用 client.delete(memory_id) 逐个删除
+        """
+        self._ensure_initialized()
+        
+        deleted_count = 0
+        
+        try:
+            # 获取所有场景记忆
+            all_memories = self.get_all_memories(limit=5000)
+            
+            memories_to_delete = []
+            
+            for memory in all_memories:
+                if not isinstance(memory, dict):
+                    continue
+                
+                metadata = memory.get("metadata", {})
+                memory_id = memory.get("id")
+                
+                if not memory_id:
+                    continue
+                
+                mem_chapter = metadata.get("chapter_index")
+                mem_scene = metadata.get("scene_index")
+                
+                # 章节过滤
+                should_delete = False
+                
+                if chapter_index_gte is not None:
+                    if mem_chapter is not None and mem_chapter >= chapter_index_gte:
+                        # 检查是否有上限
+                        if chapter_index_lte is not None:
+                            if mem_chapter <= chapter_index_lte:
+                                should_delete = True
+                        else:
+                            should_delete = True
+                        
+                        # 如果指定了场景过滤，检查是否需要更精细的过滤
+                        if scene_index_gte is not None and target_chapter_for_scene is not None:
+                            if mem_chapter == target_chapter_for_scene:
+                                # 在目标章节中，只删除 >= scene_index_gte 的场景
+                                if mem_scene is not None and mem_scene < scene_index_gte:
+                                    should_delete = False
+                
+                if should_delete:
+                    memories_to_delete.append(memory_id)
+            
+            # 批量删除
+            logger.info(f"🗑️ 准备删除 {len(memories_to_delete)} 条场景记忆...")
+            
+            for memory_id in memories_to_delete:
+                try:
+                    self.client.delete(memory_id)
+                    deleted_count += 1
+                except Exception as del_err:
+                    logger.warning(f"⚠️ 删除记忆 {memory_id} 失败: {del_err}")
+            
+            logger.info(f"✅ 已删除 {deleted_count} 条场景记忆")
+            return deleted_count
+            
+        except Exception as e:
+            logger.error(f"❌ 批量删除记忆失败: {e}")
+            raise
+    
+    def delete_entity_states_after_chapter(self, chapter_index: int, character_names: Optional[List[str]] = None) -> int:
+        """删除指定章节之后的所有实体状态
+        
+        Args:
+            chapter_index: 章节索引（删除 >= 此值的实体状态）
+            character_names: 角色名称列表（可选，如果不提供则尝试删除所有已知角色的状态）
+        
+        Returns:
+            删除的状态数量
+        """
+        self._ensure_initialized()
+        
+        deleted_count = 0
+        
+        try:
+            # 如果没有提供角色名称，尝试从项目中获取
+            if character_names is None:
+                # 这里我们尝试获取一些常见的实体类型
+                # 实际实现中可能需要从配置或文件中读取
+                logger.warning("未提供角色名称列表，将尝试清理场景内容记忆")
+                return self.delete_memories_by_filter(chapter_index_gte=chapter_index)
+            
+            for name in character_names:
+                try:
+                    agent_id = f"{self.project_id}_{name}"
+                    response = self.client.get_all(agent_id=agent_id, limit=1000)
+                    
+                    # 提取结果
+                    if isinstance(response, dict):
+                        results = response.get("results", [])
+                    elif isinstance(response, list):
+                        results = response
+                    else:
+                        results = []
+                    
+                    # 过滤并删除
+                    for memory in results:
+                        if not isinstance(memory, dict):
+                            continue
+                        
+                        metadata = memory.get("metadata", {})
+                        memory_id = memory.get("id")
+                        mem_chapter = metadata.get("chapter_index")
+                        
+                        if memory_id and mem_chapter is not None and mem_chapter >= chapter_index:
+                            try:
+                                self.client.delete(memory_id)
+                                deleted_count += 1
+                            except Exception as del_err:
+                                logger.warning(f"⚠️ 删除实体状态 {memory_id} 失败: {del_err}")
+                                
+                except Exception as entity_err:
+                    logger.warning(f"⚠️ 处理角色 {name} 的状态失败: {entity_err}")
+            
+            logger.info(f"✅ 已删除 {deleted_count} 条实体状态")
+            return deleted_count
+            
+        except Exception as e:
+            logger.error(f"❌ 删除实体状态失败: {e}")
             raise
     
     # ==================== 工具方法 ====================
@@ -1223,3 +1531,114 @@ Output: {"facts": []}
         except Exception as e:
             logger.error(f"❌ 清空 Mem0 记忆失败: {e}")
             raise
+
+    def close(self, timeout: float = 5.0):
+        """关闭 Mem0 客户端，释放资源
+        
+        在程序退出前调用，确保：
+        1. ChromaDB 数据持久化
+        2. ChromaDB 客户端正确关闭
+        3. 后台线程终止
+        4. HTTP 连接池关闭
+        
+        如果清理超时，强制退出以避免程序卡顿。
+        
+        Args:
+            timeout: 超时时间（秒），默认 5 秒
+        
+        开发者: jamesenh, 开发时间: 2025-11-30
+        更新: 2025-11-30 - 添加超时保护机制，防止程序卡顿
+        """
+        import signal
+        
+        # 调试模式
+        debug_exit = _os.getenv("NOVELGEN_DEBUG", "0") == "1"
+        
+        def _debug(msg: str):
+            if debug_exit:
+                import time as _time
+                timestamp = _time.strftime("%H:%M:%S")
+                print(f"[{timestamp}] 🔍 [mem0_manager] {msg}")
+        
+        _debug(f"close() 开始 (timeout={timeout}s)")
+        
+        if not self._initialized or self.client is None:
+            _debug("客户端未初始化，无需关闭")
+            return
+        
+        # 超时处理器
+        cleanup_timed_out = False
+        
+        def timeout_handler(signum, frame):
+            nonlocal cleanup_timed_out
+            cleanup_timed_out = True
+            _debug(f"⚠️ 清理超时 ({timeout}s)，强制退出")
+            print(f"⚠️ Mem0 清理超时 ({timeout}s)，强制退出")
+            # 强制退出进程
+            _os._exit(0)
+        
+        # 设置超时（仅在 Unix 系统上有效）
+        old_handler = None
+        try:
+            old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(int(timeout))
+            _debug(f"已设置 {timeout}s 超时保护")
+        except (AttributeError, ValueError):
+            # Windows 不支持 SIGALRM
+            _debug("当前系统不支持 SIGALRM，跳过超时保护")
+        
+        try:
+            # 尝试关闭 Mem0 客户端内部的 ChromaDB
+            _debug("尝试关闭 ChromaDB 客户端...")
+            
+            # Mem0 的 Memory 对象可能有 vector_store 属性
+            if hasattr(self.client, 'vector_store'):
+                vs = self.client.vector_store
+                _debug(f"找到 vector_store: {type(vs)}")
+                
+                # 尝试持久化数据
+                if hasattr(vs, 'persist'):
+                    _debug("调用 vector_store.persist()...")
+                    try:
+                        vs.persist()
+                        _debug("vector_store.persist() 完成")
+                    except Exception as pe:
+                        _debug(f"persist() 失败: {pe}")
+                
+                # ChromaDB 客户端可能有 _client 属性
+                if hasattr(vs, '_client'):
+                    chroma_client = vs._client
+                    _debug(f"找到 ChromaDB 客户端: {type(chroma_client)}")
+                    
+                    # 尝试调用 close 或 reset
+                    if hasattr(chroma_client, 'close'):
+                        _debug("调用 chroma_client.close()...")
+                        try:
+                            chroma_client.close()
+                            _debug("ChromaDB 客户端已关闭")
+                        except Exception as ce:
+                            _debug(f"close() 失败: {ce}")
+                    elif hasattr(chroma_client, '_identifier_to_system'):
+                        # PersistentClient 可能需要清理
+                        _debug("尝试清理 PersistentClient...")
+                        # 不主动 reset，只是确保不阻塞
+            
+            # 清理 Mem0 客户端引用
+            self.client = None
+            self._initialized = False
+            _debug("Mem0 客户端引用已清理")
+            
+        except Exception as e:
+            _debug(f"关闭 Mem0 客户端时出错: {e}")
+            logger.warning(f"关闭 Mem0 客户端时出错: {e}")
+        finally:
+            # 取消超时
+            try:
+                if old_handler is not None:
+                    signal.alarm(0)
+                    signal.signal(signal.SIGALRM, old_handler)
+                    _debug("超时保护已取消")
+            except (AttributeError, ValueError):
+                pass
+        
+        _debug("close() 完成")

@@ -5,6 +5,8 @@ LangGraph 节点包装器
 开发者: jamesenh, 开发时间: 2025-11-21
 更新: 2025-11-27 - 修复 Mem0 集成问题，添加记忆上下文检索功能
 更新: 2025-11-28 - 添加动态章节扩展节点（evaluate_story_progress, extend_outline, plan_new_chapters）
+更新: 2025-11-29 - 添加 Ctrl+C 信号处理支持
+更新: 2025-11-30 - 添加递归限制预估机制，每个节点更新 node_execution_count
 """
 import os
 import json
@@ -31,6 +33,23 @@ from novelgen.runtime.memory import generate_chapter_memory_entry
 from novelgen.runtime.summary import summarize_scenes
 
 
+def _increment_node_count(state: NovelGenerationState) -> int:
+    """递增节点执行计数
+    
+    每个节点执行时调用此函数获取新的计数值。
+    用于递归限制预估机制。
+    
+    Args:
+        state: 当前工作流状态
+        
+    Returns:
+        int: 递增后的节点执行计数
+    
+    更新: 2025-11-30 - 新增，支持递归限制预估
+    """
+    return state.node_execution_count + 1
+
+
 def load_settings_node(state: NovelGenerationState) -> Dict[str, Any]:
     """
     加载项目配置节点
@@ -39,7 +58,10 @@ def load_settings_node(state: NovelGenerationState) -> Dict[str, Any]:
     支持旧配置格式自动迁移（num_chapters → initial_chapters + max_chapters）
     
     更新: 2025-11-28 - 添加旧配置格式迁移支持和日志
+    更新: 2025-11-30 - 添加 node_execution_count 更新
     """
+    new_count = _increment_node_count(state)
+    
     try:
         settings_path = os.path.join(state.project_dir, "settings.json")
         
@@ -47,7 +69,8 @@ def load_settings_node(state: NovelGenerationState) -> Dict[str, Any]:
             return {
                 "current_step": "load_settings",
                 "failed_steps": state.failed_steps + ["load_settings"],
-                "error_messages": {**state.error_messages, "load_settings": f"settings.json 不存在: {settings_path}"}
+                "error_messages": {**state.error_messages, "load_settings": f"settings.json 不存在: {settings_path}"},
+                "node_execution_count": new_count
             }
         
         with open(settings_path, 'r', encoding='utf-8') as f:
@@ -66,14 +89,16 @@ def load_settings_node(state: NovelGenerationState) -> Dict[str, Any]:
         return {
             "settings": settings,
             "current_step": "load_settings",
-            "completed_steps": state.completed_steps + ["load_settings"]
+            "completed_steps": state.completed_steps + ["load_settings"],
+            "node_execution_count": new_count
         }
     
     except Exception as e:
         return {
             "current_step": "load_settings",
             "failed_steps": state.failed_steps + ["load_settings"],
-            "error_messages": {**state.error_messages, "load_settings": str(e)}
+            "error_messages": {**state.error_messages, "load_settings": str(e)},
+            "node_execution_count": new_count
         }
 
 
@@ -83,6 +108,8 @@ def world_creation_node(state: NovelGenerationState) -> Dict[str, Any]:
     
     调用 generate_world chain 生成世界观设定
     """
+    new_count = _increment_node_count(state)
+    
     try:
         if state.settings is None:
             raise ValueError("settings 未加载，无法生成世界观")
@@ -102,14 +129,16 @@ def world_creation_node(state: NovelGenerationState) -> Dict[str, Any]:
         return {
             "world": world,
             "current_step": "world_creation",
-            "completed_steps": state.completed_steps + ["world_creation"]
+            "completed_steps": state.completed_steps + ["world_creation"],
+            "node_execution_count": new_count
         }
     
     except Exception as e:
         return {
             "current_step": "world_creation",
             "failed_steps": state.failed_steps + ["world_creation"],
-            "error_messages": {**state.error_messages, "world_creation": str(e)}
+            "error_messages": {**state.error_messages, "world_creation": str(e)},
+            "node_execution_count": new_count
         }
 
 
@@ -119,6 +148,8 @@ def theme_conflict_creation_node(state: NovelGenerationState) -> Dict[str, Any]:
     
     调用 generate_theme_conflict chain 生成主题与冲突
     """
+    new_count = _increment_node_count(state)
+    
     try:
         if state.settings is None or state.world is None:
             raise ValueError("settings 或 world 未加载")
@@ -138,14 +169,16 @@ def theme_conflict_creation_node(state: NovelGenerationState) -> Dict[str, Any]:
         return {
             "theme_conflict": theme_conflict,
             "current_step": "theme_conflict_creation",
-            "completed_steps": state.completed_steps + ["theme_conflict_creation"]
+            "completed_steps": state.completed_steps + ["theme_conflict_creation"],
+            "node_execution_count": new_count
         }
     
     except Exception as e:
         return {
             "current_step": "theme_conflict_creation",
             "failed_steps": state.failed_steps + ["theme_conflict_creation"],
-            "error_messages": {**state.error_messages, "theme_conflict_creation": str(e)}
+            "error_messages": {**state.error_messages, "theme_conflict_creation": str(e)},
+            "node_execution_count": new_count
         }
 
 
@@ -156,6 +189,8 @@ def character_creation_node(state: NovelGenerationState) -> Dict[str, Any]:
     调用 generate_characters chain 生成角色配置
     并初始化角色状态到 Mem0
     """
+    new_count = _increment_node_count(state)
+    
     try:
         if state.settings is None or state.world is None or state.theme_conflict is None:
             raise ValueError("settings, world 或 theme_conflict 未加载")
@@ -180,14 +215,16 @@ def character_creation_node(state: NovelGenerationState) -> Dict[str, Any]:
         return {
             "characters": characters,
             "current_step": "character_creation",
-            "completed_steps": state.completed_steps + ["character_creation"]
+            "completed_steps": state.completed_steps + ["character_creation"],
+            "node_execution_count": new_count
         }
     
     except Exception as e:
         return {
             "current_step": "character_creation",
             "failed_steps": state.failed_steps + ["character_creation"],
-            "error_messages": {**state.error_messages, "character_creation": str(e)}
+            "error_messages": {**state.error_messages, "character_creation": str(e)},
+            "node_execution_count": new_count
         }
 
 
@@ -201,6 +238,8 @@ def outline_creation_node(state: NovelGenerationState) -> Dict[str, Any]:
     
     更新: 2025-11-28 - 支持动态章节模式
     """
+    new_count = _increment_node_count(state)
+    
     try:
         if not all([state.settings, state.world, state.theme_conflict, state.characters]):
             raise ValueError("前置步骤未完成，无法生成大纲")
@@ -245,14 +284,16 @@ def outline_creation_node(state: NovelGenerationState) -> Dict[str, Any]:
         return {
             "outline": outline,
             "current_step": "outline_creation",
-            "completed_steps": state.completed_steps + ["outline_creation"]
+            "completed_steps": state.completed_steps + ["outline_creation"],
+            "node_execution_count": new_count
         }
     
     except Exception as e:
         return {
             "current_step": "outline_creation",
             "failed_steps": state.failed_steps + ["outline_creation"],
-            "error_messages": {**state.error_messages, "outline_creation": str(e)}
+            "error_messages": {**state.error_messages, "outline_creation": str(e)},
+            "node_execution_count": new_count
         }
 
 
@@ -265,7 +306,10 @@ def init_chapter_loop_node(state: NovelGenerationState) -> Dict[str, Any]:
 
     更新: 2025-11-27 - 修改为找到第一个未完成的章节，而不是总是从第1章开始
     更新: 2025-11-28 - 修复 completed_steps 重复添加问题（动态扩展时会多次调用此节点）
+    更新: 2025-11-30 - 添加 node_execution_count 更新
     """
+    new_count = _increment_node_count(state)
+    
     try:
         if not state.chapters_plan:
             raise ValueError("chapters_plan 为空，无法初始化章节循环")
@@ -306,7 +350,8 @@ def init_chapter_loop_node(state: NovelGenerationState) -> Dict[str, Any]:
             return {
                 "current_chapter_number": first_incomplete_chapter,
                 "current_step": "init_chapter_loop",
-                "completed_steps": new_completed_steps
+                "completed_steps": new_completed_steps,
+                "node_execution_count": new_count
             }
         else:
             # 所有章节都已完成
@@ -317,14 +362,16 @@ def init_chapter_loop_node(state: NovelGenerationState) -> Dict[str, Any]:
             return {
                 "current_chapter_number": last_chapter,
                 "current_step": "init_chapter_loop",
-                "completed_steps": new_completed_steps
+                "completed_steps": new_completed_steps,
+                "node_execution_count": new_count
             }
 
     except Exception as e:
         return {
             "current_step": "init_chapter_loop",
             "failed_steps": state.failed_steps + ["init_chapter_loop"],
-            "error_messages": {**state.error_messages, "init_chapter_loop": str(e)}
+            "error_messages": {**state.error_messages, "init_chapter_loop": str(e)},
+            "node_execution_count": new_count
         }
 
 
@@ -334,6 +381,8 @@ def next_chapter_node(state: NovelGenerationState) -> Dict[str, Any]:
     
     将 current_chapter_number 增加 1，准备处理下一章
     """
+    new_count = _increment_node_count(state)
+    
     try:
         if state.current_chapter_number is None:
             raise ValueError("current_chapter_number 未设置")
@@ -344,14 +393,16 @@ def next_chapter_node(state: NovelGenerationState) -> Dict[str, Any]:
         
         return {
             "current_chapter_number": next_chapter_number,
-            "current_step": "next_chapter"
+            "current_step": "next_chapter",
+            "node_execution_count": new_count
         }
     
     except Exception as e:
         return {
             "current_step": "next_chapter",
             "failed_steps": state.failed_steps + ["next_chapter"],
-            "error_messages": {**state.error_messages, "next_chapter": str(e)}
+            "error_messages": {**state.error_messages, "next_chapter": str(e)},
+            "node_execution_count": new_count
         }
 
 
@@ -362,6 +413,8 @@ def chapter_planning_node(state: NovelGenerationState) -> Dict[str, Any]:
     为 outline 中的所有章节生成详细计划
     注：这是批量生成节点，处理所有章节
     """
+    new_count = _increment_node_count(state)
+    
     try:
         if state.outline is None:
             raise ValueError("outline 未生成，无法创建章节计划")
@@ -402,14 +455,16 @@ def chapter_planning_node(state: NovelGenerationState) -> Dict[str, Any]:
         return {
             "chapters_plan": chapters_plan,
             "current_step": "chapter_planning",
-            "completed_steps": state.completed_steps + ["chapter_planning"]
+            "completed_steps": state.completed_steps + ["chapter_planning"],
+            "node_execution_count": new_count
         }
     
     except Exception as e:
         return {
             "current_step": "chapter_planning",
             "failed_steps": state.failed_steps + ["chapter_planning"],
-            "error_messages": {**state.error_messages, "chapter_planning": str(e)}
+            "error_messages": {**state.error_messages, "chapter_planning": str(e)},
+            "node_execution_count": new_count
         }
 
 
@@ -721,6 +776,8 @@ def chapter_generation_node(state: NovelGenerationState) -> Dict[str, Any]:
     根据 state.current_chapter_number 生成指定章节的场景文本
     支持从 Mem0 检索记忆上下文以提升生成一致性
     """
+    new_count = _increment_node_count(state)
+    
     try:
         if not state.chapters_plan:
             raise ValueError("chapters_plan 为空，无法生成章节文本")
@@ -833,14 +890,16 @@ def chapter_generation_node(state: NovelGenerationState) -> Dict[str, Any]:
             "chapters": chapters,
             "chapter_memories": chapter_memories,
             "current_step": "chapter_generation",
-            "completed_steps": state.completed_steps + [f"chapter_generation_{chapter_number}"]
+            "completed_steps": state.completed_steps + [f"chapter_generation_{chapter_number}"],
+            "node_execution_count": new_count
         }
 
     except Exception as e:
         return {
             "current_step": "chapter_generation",
             "failed_steps": state.failed_steps + ["chapter_generation"],
-            "error_messages": {**state.error_messages, "chapter_generation": str(e)}
+            "error_messages": {**state.error_messages, "chapter_generation": str(e)},
+            "node_execution_count": new_count
         }
 
 
@@ -854,9 +913,11 @@ def consistency_check_node(state: NovelGenerationState) -> Dict[str, Any]:
     - 角色配置
     - 前文章节记忆
     """
+    new_count = _increment_node_count(state)
+    chapter_number = state.current_chapter_number
+    
     try:
         # 获取当前章节编号
-        chapter_number = state.current_chapter_number
         if chapter_number is None:
             raise ValueError("current_chapter_number 未设置，无法进行一致性检测")
         
@@ -916,14 +977,16 @@ def consistency_check_node(state: NovelGenerationState) -> Dict[str, Any]:
         return {
             "consistency_reports": consistency_reports,
             "current_step": "consistency_check",
-            "completed_steps": state.completed_steps + [f"consistency_check_{chapter_number}"]
+            "completed_steps": state.completed_steps + [f"consistency_check_{chapter_number}"],
+            "node_execution_count": new_count
         }
     
     except Exception as e:
         return {
             "current_step": "consistency_check",
             "failed_steps": state.failed_steps + [f"consistency_check_{chapter_number}"],
-            "error_messages": {**state.error_messages, f"consistency_check_{chapter_number}": str(e)}
+            "error_messages": {**state.error_messages, f"consistency_check_{chapter_number}": str(e)},
+            "node_execution_count": new_count
         }
 
 
@@ -933,9 +996,11 @@ def chapter_revision_node(state: NovelGenerationState) -> Dict[str, Any]:
     
     根据一致性检测结果自动修订章节
     """
+    new_count = _increment_node_count(state)
+    chapter_number = state.current_chapter_number
+    
     try:
         # 获取当前章节编号
-        chapter_number = state.current_chapter_number
         if chapter_number is None:
             raise ValueError("current_chapter_number 未设置，无法进行修订")
         
@@ -950,7 +1015,8 @@ def chapter_revision_node(state: NovelGenerationState) -> Dict[str, Any]:
             print(f"✅ 第 {chapter_number} 章无需修订")
             return {
                 "current_step": "chapter_revision",
-                "completed_steps": state.completed_steps + [f"chapter_revision_{chapter_number}_skipped"]
+                "completed_steps": state.completed_steps + [f"chapter_revision_{chapter_number}_skipped"],
+                "node_execution_count": new_count
             }
         
         # 构建修订说明
@@ -993,7 +1059,8 @@ def chapter_revision_node(state: NovelGenerationState) -> Dict[str, Any]:
         return {
             "chapters": chapters,
             "current_step": "chapter_revision",
-            "completed_steps": state.completed_steps + [f"chapter_revision_{chapter_number}"]
+            "completed_steps": state.completed_steps + [f"chapter_revision_{chapter_number}"],
+            "node_execution_count": new_count
         }
     
     except Exception as e:
@@ -1001,7 +1068,8 @@ def chapter_revision_node(state: NovelGenerationState) -> Dict[str, Any]:
         return {
             "current_step": "chapter_revision",
             "failed_steps": state.failed_steps + [f"chapter_revision_{chapter_number}"],
-            "error_messages": {**state.error_messages, f"chapter_revision_{chapter_number}": str(e)}
+            "error_messages": {**state.error_messages, f"chapter_revision_{chapter_number}": str(e)},
+            "node_execution_count": new_count
         }
 
 
@@ -1024,6 +1092,8 @@ def evaluate_story_progress_node(state: NovelGenerationState) -> Dict[str, Any]:
     开发者: jamesenh, 开发时间: 2025-11-28
     更新: 2025-11-28 - 添加代码级强制保障，防止 LLM 不遵守评估规则
     """
+    new_count = _increment_node_count(state)
+    
     try:
         if state.outline is None or state.theme_conflict is None or state.settings is None:
             raise ValueError("outline, theme_conflict 或 settings 未加载")
@@ -1082,14 +1152,16 @@ def evaluate_story_progress_node(state: NovelGenerationState) -> Dict[str, Any]:
         return {
             "story_progress_evaluation": evaluation,
             "current_step": "evaluate_story_progress",
-            "completed_steps": state.completed_steps + ["evaluate_story_progress"]
+            "completed_steps": state.completed_steps + ["evaluate_story_progress"],
+            "node_execution_count": new_count
         }
     
     except Exception as e:
         return {
             "current_step": "evaluate_story_progress",
             "failed_steps": state.failed_steps + ["evaluate_story_progress"],
-            "error_messages": {**state.error_messages, "evaluate_story_progress": str(e)}
+            "error_messages": {**state.error_messages, "evaluate_story_progress": str(e)},
+            "node_execution_count": new_count
         }
 
 
@@ -1104,6 +1176,8 @@ def extend_outline_node(state: NovelGenerationState) -> Dict[str, Any]:
     开发者: jamesenh, 开发时间: 2025-11-28
     更新: 2025-11-28 - 添加无限循环检测，修复剩余章节数计算
     """
+    new_count = _increment_node_count(state)
+    
     try:
         if state.outline is None or state.story_progress_evaluation is None or state.settings is None:
             raise ValueError("outline, story_progress_evaluation 或 settings 未加载")
@@ -1133,8 +1207,8 @@ def extend_outline_node(state: NovelGenerationState) -> Dict[str, Any]:
         
         # 计算新增章节数
         old_count = len(state.outline.chapters)
-        new_count = len(extended_outline.chapters)
-        added_count = new_count - old_count
+        new_chapter_count = len(extended_outline.chapters)
+        added_count = new_chapter_count - old_count
         
         # ===== 无限循环检测 =====
         # 如果扩展后没有新增章节，强制标记大纲为完成，防止无限循环
@@ -1143,7 +1217,7 @@ def extend_outline_node(state: NovelGenerationState) -> Dict[str, Any]:
             extended_outline.is_complete = True
             extended_outline.current_phase = "resolution"
         
-        print(f"✅ 大纲扩展完成：新增 {added_count} 章（共 {new_count} 章）")
+        print(f"✅ 大纲扩展完成：新增 {added_count} 章（共 {new_chapter_count} 章）")
         if extended_outline.is_complete:
             print(f"   📕 大纲已完整（包含结局）")
         
@@ -1156,14 +1230,16 @@ def extend_outline_node(state: NovelGenerationState) -> Dict[str, Any]:
             "outline": extended_outline,
             "story_progress_evaluation": None,  # 清除评估结果，等待下次评估
             "current_step": "extend_outline",
-            "completed_steps": state.completed_steps + ["extend_outline"]
+            "completed_steps": state.completed_steps + ["extend_outline"],
+            "node_execution_count": new_count
         }
     
     except Exception as e:
         return {
             "current_step": "extend_outline",
             "failed_steps": state.failed_steps + ["extend_outline"],
-            "error_messages": {**state.error_messages, "extend_outline": str(e)}
+            "error_messages": {**state.error_messages, "extend_outline": str(e)},
+            "node_execution_count": new_count
         }
 
 
@@ -1176,6 +1252,8 @@ def plan_new_chapters_node(state: NovelGenerationState) -> Dict[str, Any]:
     
     开发者: jamesenh, 开发时间: 2025-11-28
     """
+    new_count = _increment_node_count(state)
+    
     try:
         if state.outline is None:
             raise ValueError("outline 未加载")
@@ -1226,14 +1304,16 @@ def plan_new_chapters_node(state: NovelGenerationState) -> Dict[str, Any]:
         return {
             "chapters_plan": chapters_plan,
             "current_step": "plan_new_chapters",
-            "completed_steps": state.completed_steps + ["plan_new_chapters"]
+            "completed_steps": state.completed_steps + ["plan_new_chapters"],
+            "node_execution_count": new_count
         }
     
     except Exception as e:
         return {
             "current_step": "plan_new_chapters",
             "failed_steps": state.failed_steps + ["plan_new_chapters"],
-            "error_messages": {**state.error_messages, "plan_new_chapters": str(e)}
+            "error_messages": {**state.error_messages, "plan_new_chapters": str(e)},
+            "node_execution_count": new_count
         }
 
 
@@ -1437,7 +1517,10 @@ def scene_generation_wrapper_node(state: NovelGenerationState) -> Dict[str, Any]
     后续可以改为调用子图。
     
     开发者: jamesenh, 开发时间: 2025-11-28
+    更新: 2025-11-30 - 添加 node_execution_count 更新
     """
+    new_count = _increment_node_count(state)
+    
     try:
         if not state.chapters_plan:
             raise ValueError("chapters_plan 为空，无法生成章节文本")
@@ -1466,7 +1549,8 @@ def scene_generation_wrapper_node(state: NovelGenerationState) -> Dict[str, Any]
             return {
                 "chapters": chapters,
                 "current_step": "chapter_generation",
-                "completed_steps": state.completed_steps + [f"chapter_generation_{chapter_number}"]
+                "completed_steps": state.completed_steps + [f"chapter_generation_{chapter_number}"],
+                "node_execution_count": new_count
             }
 
         # 初始化 Mem0Manager
@@ -1512,15 +1596,37 @@ def scene_generation_wrapper_node(state: NovelGenerationState) -> Dict[str, Any]
             if scene_generation_subgraph is not None:
                 # 使用子图处理
                 result = scene_generation_subgraph.invoke(subgraph_state.model_dump())
-                generated_scenes = [GeneratedScene(**s) for s in result.get("generated_scenes", [])]
+                raw_scenes = result.get("generated_scenes", [])
+                
+                # 安全地转换场景数据（处理对象和字典两种情况）
+                generated_scenes = []
+                for s in raw_scenes:
+                    if isinstance(s, GeneratedScene):
+                        generated_scenes.append(s)
+                    elif isinstance(s, dict):
+                        generated_scenes.append(GeneratedScene(**s))
+                    elif hasattr(s, 'model_dump'):
+                        # Pydantic 对象但类型不匹配，尝试转换
+                        generated_scenes.append(GeneratedScene(**s.model_dump()))
+                    else:
+                        print(f"  ⚠️ 未知场景类型: {type(s)}, 跳过")
             else:
                 raise ImportError("scene_generation_subgraph 未定义")
-        except (ImportError, AttributeError):
+        except (ImportError, AttributeError) as e:
             # 子图不可用，使用内联逻辑
+            print(f"  ℹ️ 使用内联逻辑生成场景 (原因: {e})")
             generated_scenes = list(subgraph_state.generated_scenes)
             previous_summary = subgraph_state.previous_summary
             
+            # 导入停止信号检查函数
+            from novelgen.runtime.mem0_manager import is_shutdown_requested
+            
             for i in range(subgraph_state.current_scene_number, subgraph_state.total_scenes + 1):
+                # 检查是否收到停止信号
+                if is_shutdown_requested():
+                    print(f"  ⏹️ 收到停止信号，停止场景生成（已完成 {len(generated_scenes)} 个场景）")
+                    break
+                
                 scene_plan = plan.scenes[i - 1]
                 
                 # 检索记忆上下文
@@ -1565,6 +1671,23 @@ def scene_generation_wrapper_node(state: NovelGenerationState) -> Dict[str, Any]
                 generated_scenes.append(scene)
                 previous_summary = scene.content[:200] + "..." if len(scene.content) > 200 else scene.content
 
+        # 如果 generated_scenes 为空但场景文件存在，从文件重新加载（回退机制）
+        if not generated_scenes:
+            print(f"  ⚠️ 场景列表为空，尝试从文件重新加载...")
+            for scene_plan in plan.scenes:
+                scene_file = os.path.join(
+                    chapters_dir,
+                    f"scene_{chapter_number:03d}_{scene_plan.scene_number:03d}.json"
+                )
+                if os.path.exists(scene_file):
+                    with open(scene_file, 'r', encoding='utf-8') as f:
+                        scene = GeneratedScene(**json.load(f))
+                    generated_scenes.append(scene)
+            if generated_scenes:
+                print(f"  ✅ 从文件加载了 {len(generated_scenes)} 个场景")
+            else:
+                print(f"  ❌ 未找到任何场景文件")
+
         # 合并场景为章节
         chapter = GeneratedChapter(
             chapter_number=chapter_number,
@@ -1576,6 +1699,7 @@ def scene_generation_wrapper_node(state: NovelGenerationState) -> Dict[str, Any]
         # 保存完整章节文件
         with open(chapter_path, 'w', encoding='utf-8') as f:
             json.dump(chapter.model_dump(), f, ensure_ascii=False, indent=2)
+        print(f"  💾 章节文件已保存: {chapter_path}")
 
         # 清理单独的场景文件（可选，保留以便调试）
         # for scene in generated_scenes:
@@ -1604,14 +1728,16 @@ def scene_generation_wrapper_node(state: NovelGenerationState) -> Dict[str, Any]
             "chapters": chapters,
             "chapter_memories": chapter_memories,
             "current_step": "chapter_generation",
-            "completed_steps": state.completed_steps + [f"chapter_generation_{chapter_number}"]
+            "completed_steps": state.completed_steps + [f"chapter_generation_{chapter_number}"],
+            "node_execution_count": new_count
         }
 
     except Exception as e:
         return {
             "current_step": "chapter_generation",
             "failed_steps": state.failed_steps + ["chapter_generation"],
-            "error_messages": {**state.error_messages, "chapter_generation": str(e)}
+            "error_messages": {**state.error_messages, "chapter_generation": str(e)},
+            "node_execution_count": new_count
         }
 
 

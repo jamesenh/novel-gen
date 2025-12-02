@@ -7,13 +7,36 @@ LangGraph 工作流定义
 更新: 2025-11-27 - 添加条件边实现状态持久化，自动跳过已完成的节点
 更新: 2025-11-28 - 添加动态章节扩展支持（evaluate_story_progress, extend_outline, plan_new_chapters）
 更新: 2025-11-28 - 添加场景生成子工作流支持（scene_generation_subgraph）
+更新: 2025-11-30 - 添加退出调试日志和 SQLite 连接管理
+更新: 2025-11-30 - 添加递归限制预估机制，支持环境变量配置和主动停止
 """
 import os
 import sqlite3
+import time
+import threading
 from typing import Literal, Optional, Dict, Any
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.sqlite import SqliteSaver
+
+# 调试模式
+DEBUG_EXIT = os.getenv("NOVELGEN_DEBUG", "0") == "1"
+
+# 递归限制配置
+# 从环境变量读取，默认 500（足够 80+ 章）
+DEFAULT_RECURSION_LIMIT = int(os.getenv("LANGGRAPH_RECURSION_LIMIT", "500"))
+
+# 每章预估节点消耗数（用于预估机制）
+# chapter_generation + consistency_check + [chapter_revision] + next_chapter + 条件边
+ESTIMATED_NODES_PER_CHAPTER = int(os.getenv("LANGGRAPH_NODES_PER_CHAPTER", "6"))
+
+
+def _debug_log(msg: str):
+    """输出调试日志（仅在 DEBUG_EXIT=True 时）"""
+    if DEBUG_EXIT:
+        timestamp = time.strftime("%H:%M:%S")
+        thread_name = threading.current_thread().name
+        print(f"[{timestamp}][{thread_name}] 🔍 [workflow] {msg}")
 
 from novelgen.models import NovelGenerationState, SceneGenerationState
 from novelgen.runtime.nodes import (
@@ -346,6 +369,7 @@ def create_novel_generation_workflow(checkpointer=None, project_dir: Optional[st
     
     # 条件分支 2：判断是否继续生成、需要评估扩展、还是结束
     # 更新: 2025-11-28 - 支持动态章节扩展
+    # 更新: 2025-11-30 - 添加递归限制预估检查
     def should_evaluate_or_continue(state: NovelGenerationState) -> Literal["execute", "skip", "evaluate", "end"]:
         """
         判断下一步操作：继续生成、跳过、评估扩展、还是结束
@@ -354,30 +378,48 @@ def create_novel_generation_workflow(checkpointer=None, project_dir: Optional[st
         - "execute": 继续生成下一章
         - "skip": 下一章已存在，跳过
         - "evaluate": 需要评估剧情进度（已规划章节已完成但大纲未完整）
-        - "end": 所有章节已完成且大纲已完整
+        - "end": 所有章节已完成且大纲已完整，或递归限制不足
+        
+        更新: 2025-11-30 - 添加递归限制预估检查，防止 GraphRecursionError
         """
+        # 检查是否因递归限制主动停止
+        if state.should_stop_early:
+            print(f"  ⏹️ 因递归限制预估不足，已主动停止")
+            return "end"
+        
+        # 预估检查：剩余递归次数是否足够完成下一章
+        remaining_steps = state.recursion_limit - state.node_execution_count
+        if remaining_steps < ESTIMATED_NODES_PER_CHAPTER:
+            print(f"  ⚠️ 剩余递归次数({remaining_steps}) < 每章所需({ESTIMATED_NODES_PER_CHAPTER})，主动停止")
+            print(f"     已执行节点数: {state.node_execution_count}, 递归限制: {state.recursion_limit}")
+            return "end"
+        
         if state.current_chapter_number is None:
             return "end"
         
-        next_num = state.current_chapter_number + 1
+        # 修复: 2025-11-30 - 检查当前章节号，而不是 +1
+        # next_chapter 节点已经将章节号增加了，这里应该检查当前章节是否需要执行
+        current_num = state.current_chapter_number
         
-        # 检查下一章是否在计划中
-        if next_num in state.chapters_plan:
-            # 下一章已有计划，检查是否已生成
-            if next_num in state.chapters:
-                chapter = state.chapters[next_num]
+        # 检查当前章节是否在计划中
+        if current_num in state.chapters_plan:
+            # 当前章节已有计划，检查是否已生成
+            if current_num in state.chapters:
+                chapter = state.chapters[current_num]
                 if chapter.scenes and len(chapter.scenes) > 0:
-                    print(f"  ⏭️ 第 {next_num} 章已生成，跳过")
+                    print(f"  ⏭️ 第 {current_num} 章已生成，跳过")
                     return "skip"
+            print(f"  ▶️ 第 {current_num} 章待生成")
             return "execute"
         
-        # 下一章不在计划中，检查是否需要扩展大纲
+        # 当前章节不在计划中，检查是否需要扩展大纲
         if state.outline and not state.outline.is_complete:
             # 大纲未完成，需要评估是否扩展
             print(f"  📊 已完成所有已规划章节，需要评估剧情进度")
             return "evaluate"
         
-        # 大纲已完成，结束生成
+        # 大纲已完成且所有章节都已处理，结束生成
+        print(f"  ✅ 所有 {current_num - 1} 章已完成，大纲已完整")
         return "end"
 
     workflow.add_conditional_edges(
@@ -428,15 +470,40 @@ def create_novel_generation_workflow(checkpointer=None, project_dir: Optional[st
     if checkpointer is None:
         if project_dir:
             db_path = os.path.join(project_dir, "workflow_checkpoints.db")
+            _debug_log(f"创建 SQLite 连接: {db_path}")
             conn = sqlite3.connect(db_path, check_same_thread=False)
             checkpointer = SqliteSaver(conn)
+            _debug_log("SqliteSaver 已创建")
         else:
+            _debug_log("使用 MemorySaver（内存模式）")
             checkpointer = MemorySaver()
     
     # 编译工作流
+    # 更新: 2025-11-30 - 递归限制现在通过 invoke/stream 的 config 传入
+    # 这里不再在 compile 时设置，因为 compile 不支持 recursion_limit 参数
+    _debug_log(f"编译工作流... (默认递归限制: {DEFAULT_RECURSION_LIMIT})")
     app = workflow.compile(checkpointer=checkpointer)
+    _debug_log("工作流编译完成")
     
     return app
+
+
+def get_default_recursion_limit() -> int:
+    """获取默认递归限制值（从环境变量读取）
+    
+    Returns:
+        int: 递归限制值，默认 500
+    """
+    return DEFAULT_RECURSION_LIMIT
+
+
+def get_estimated_nodes_per_chapter() -> int:
+    """获取每章预估节点消耗数
+    
+    Returns:
+        int: 每章预估节点数，默认 6
+    """
+    return ESTIMATED_NODES_PER_CHAPTER
 
 
 def visualize_workflow(workflow_app, output_format: str = "mermaid") -> str:
