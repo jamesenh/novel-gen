@@ -12,7 +12,7 @@ from novelgen.llm import get_llm, get_structured_llm
 from novelgen.chains.output_fixing import LLMJsonRepairOutputParser
 
 
-def create_characters_chain(verbose: bool = False, llm_config=None):
+def create_characters_chain(verbose: bool = False, llm_config=None, show_prompt: bool = True):
     """创建角色生成链
     
     优先使用 structured_output 模式（如果配置启用且后端支持），
@@ -24,7 +24,8 @@ def create_characters_chain(verbose: bool = False, llm_config=None):
             structured_llm = get_structured_llm(
                 pydantic_model=CharactersConfig,
                 config=llm_config,
-                verbose=verbose
+                verbose=verbose,
+                show_prompt=show_prompt
             )
             
             # structured_output 模式下的 prompt
@@ -70,7 +71,7 @@ def create_characters_chain(verbose: bool = False, llm_config=None):
             print(f"⚠️  structured_output 模式初始化失败，退回传统解析路径: {e}")
     
     # 传统解析路径（fallback）
-    llm = get_llm(config=llm_config, verbose=verbose)
+    llm = get_llm(config=llm_config, verbose=verbose, show_prompt=show_prompt)
     base_parser = PydanticOutputParser[CharactersConfig](pydantic_object=CharactersConfig)
     parser = LLMJsonRepairOutputParser[CharactersConfig](parser=base_parser, llm=llm)
 
@@ -108,7 +109,7 @@ def create_characters_chain(verbose: bool = False, llm_config=None):
     return chain
 
 
-def generate_characters(world_setting: WorldSetting, theme_conflict: ThemeConflict, verbose: bool = False, llm_config=None) -> CharactersConfig:
+def generate_characters(world_setting: WorldSetting, theme_conflict: ThemeConflict, verbose: bool = False, llm_config=None, show_prompt: bool = True) -> CharactersConfig:
     """
     生成角色
 
@@ -117,11 +118,12 @@ def generate_characters(world_setting: WorldSetting, theme_conflict: ThemeConfli
         theme_conflict: 主题冲突
         verbose: 是否输出详细日志（提示词、时间、token）
         llm_config: LLM配置
+        show_prompt: verbose 模式下是否显示完整提示词
 
     Returns:
         CharactersConfig对象
     """
-    chain = create_characters_chain(verbose=verbose, llm_config=llm_config)
+    chain = create_characters_chain(verbose=verbose, llm_config=llm_config, show_prompt=show_prompt)
     
     # 准备输入参数
     input_data = {

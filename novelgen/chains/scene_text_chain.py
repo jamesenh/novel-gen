@@ -17,18 +17,19 @@ from novelgen.llm import get_llm, get_structured_llm
 from novelgen.chains.output_fixing import LLMJsonRepairOutputParser
 
 
-def create_scene_text_chain(verbose: bool = False, llm_config=None):
+def create_scene_text_chain(verbose: bool = False, llm_config=None, show_prompt: bool = True):
     """创建场景文本生成链
     
     优先使用 structured_output 模式。
-    注：由于此链生成长正文，后续可考虑拆分为“结构 + 正文”两步生成。
+    注：由于此链生成长正文，后续可考虑拆分为"结构 + 正文"两步生成。
     """
     if llm_config is None or llm_config.use_structured_output:
         try:
             structured_llm = get_structured_llm(
                 pydantic_model=GeneratedScene,
                 config=llm_config,
-                verbose=verbose
+                verbose=verbose,
+                show_prompt=show_prompt
             )
             
             # structured_output 模式下的 prompt
@@ -92,7 +93,7 @@ def create_scene_text_chain(verbose: bool = False, llm_config=None):
 【场景记忆上下文（如有）】
 {scene_memory_context}
 
-【场景计划、
+【场景计划】
 {scene_plan}
 
 【前文概要】
@@ -105,7 +106,7 @@ def create_scene_text_chain(verbose: bool = False, llm_config=None):
         except Exception as e:
             print(f"⚠️  structured_output 模式初始化失败，退回传统解析路径: {e}")
     
-    llm = get_llm(config=llm_config, verbose=verbose)
+    llm = get_llm(config=llm_config, verbose=verbose, show_prompt=show_prompt)
     base_parser = PydanticOutputParser[GeneratedScene](pydantic_object=GeneratedScene)
     parser = LLMJsonRepairOutputParser[GeneratedScene](parser=base_parser, llm=llm)
 
@@ -191,6 +192,7 @@ def generate_scene_text(
     scene_memory_context: Optional[SceneMemoryContext] = None,
     verbose: bool = False,
     llm_config=None,
+    show_prompt: bool = True,
 ) -> GeneratedScene:
     """
     生成场景文本
@@ -202,11 +204,12 @@ def generate_scene_text(
         previous_summary: 前文概要
         verbose: 是否输出详细日志（提示词、时间、token）
         llm_config: LLM配置
+        show_prompt: verbose 模式下是否显示完整提示词
 
     Returns:
         GeneratedScene对象
     """
-    chain = create_scene_text_chain(verbose=verbose, llm_config=llm_config)
+    chain = create_scene_text_chain(verbose=verbose, llm_config=llm_config, show_prompt=show_prompt)
 
     # 计算字数范围
     target_words = scene_plan.estimated_words

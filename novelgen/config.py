@@ -1,11 +1,16 @@
 """
 配置管理
 管理LLM配置、API密钥等
+
+更新: 2025-11-25 - 简化配置，移除独立的 SQLite 和 VectorStore 相关配置
 """
 import os
-from typing import Optional, Dict, Literal
+from typing import Optional, Dict, Literal, TYPE_CHECKING
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
+
+if TYPE_CHECKING:
+    from novelgen.models import Mem0Config
 
 
 # 在模块导入阶段自动加载默认的 .env 文件，支持 .env.local 优先级
@@ -31,10 +36,17 @@ class EmbeddingConfig(BaseModel):
         
         # 从环境变量读取配置（环境变量优先级高于传入参数）
         # 如果参数未提供，尝试从环境变量读取
+        # 注意：OPENAI_API_BASE 已废弃，请使用 OPENAI_BASE_URL 或 EMBEDDING_BASE_URL
         if self.api_key is None:
             self.api_key = os.getenv("EMBEDDING_API_KEY") or os.getenv("OPENAI_API_KEY")
         if self.base_url is None:
-            self.base_url = os.getenv("EMBEDDING_BASE_URL") or os.getenv("OPENAI_API_BASE")
+            self.base_url = os.getenv("EMBEDDING_BASE_URL") or os.getenv("OPENAI_BASE_URL")
+
+        # 兼容已废弃的 OPENAI_API_BASE（显示警告）
+        if self.base_url is None and os.getenv("OPENAI_API_BASE"):
+            import warnings
+            warnings.warn("OPENAI_API_BASE 已废弃，请使用 OPENAI_BASE_URL 或 EMBEDDING_BASE_URL")
+            self.base_url = os.getenv("OPENAI_API_BASE")
         
         # model_name 特殊处理：优先使用环境变量，如果都没有则使用默认值
         env_model = os.getenv("EMBEDDING_MODEL_NAME")
@@ -152,8 +164,8 @@ class ProjectConfig(BaseModel):
     """项目配置
 
     注意：
-    - 持久化相关行为可以通过 ProjectConfig 字段或环境变量控制；
-    - 默认情况下会启用数据持久化和向量存储，并将数据写入 project_dir/data 下。
+    - 使用 Mem0 作为唯一的记忆层，必须启用 Mem0（设置 MEM0_ENABLED=true）
+    - Mem0 内部使用 ChromaDB 存储向量，路径由 vector_store_dir 配置
     """
 
     project_dir: str = Field(description="项目目录")
@@ -163,21 +175,13 @@ class ProjectConfig(BaseModel):
         default="none",
         description="章节修订策略：none(不修订), auto_apply(自动应用), manual_confirm(人工确认)"
     )
-    persistence_enabled: bool = Field(
-        default=True,
-        description="是否启用数据持久化。可通过环境变量 NOVELGEN_PERSISTENCE_ENABLED 控制。",
-    )
-    vector_store_enabled: bool = Field(
-        default=True,
-        description="是否启用向量存储。可通过环境变量 NOVELGEN_VECTOR_STORE_ENABLED 控制。",
-    )
-    db_path: Optional[str] = Field(
-        default=None,
-        description="数据库文件路径，可以是绝对路径或相对于 project_dir 的相对路径；默认使用 project_dir/data/novel.db。",
-    )
     vector_store_dir: Optional[str] = Field(
         default=None,
-        description="向量存储持久化目录，可以是绝对路径或相对于 project_dir 的相对路径；默认使用 project_dir/data/vectors。",
+        description="Mem0 内部 ChromaDB 存储目录，默认使用 project_dir/data/vectors。",
+    )
+    world_variants_count: int = Field(
+        default=3,
+        description="世界观候选生成数量（2-5），通过 WORLD_VARIANTS_COUNT 环境变量配置"
     )
 
     def __init__(self, **data):
@@ -187,27 +191,61 @@ class ProjectConfig(BaseModel):
             if env_policy in ("none", "auto_apply", "manual_confirm"):
                 data["revision_policy"] = env_policy
 
-        # 从环境变量读取持久化开关（如果未在参数中提供）
-        if "persistence_enabled" not in data:
-            env_persistence = os.getenv("NOVELGEN_PERSISTENCE_ENABLED", "true")
-            data["persistence_enabled"] = env_persistence.lower() in ("true", "1", "yes", "on")
-
-        if "vector_store_enabled" not in data:
-            env_vector = os.getenv("NOVELGEN_VECTOR_STORE_ENABLED", "true")
-            data["vector_store_enabled"] = env_vector.lower() in ("true", "1", "yes", "on")
-
-        # 从环境变量读取数据库路径和向量存储目录（如果未在参数中提供）
-        if "db_path" not in data:
-            env_db_path = os.getenv("NOVELGEN_DB_PATH")
-            if env_db_path:
-                data["db_path"] = env_db_path
-
+        # 从环境变量读取向量存储目录（如果未在参数中提供）
         if "vector_store_dir" not in data:
             env_vector_dir = os.getenv("NOVELGEN_VECTOR_STORE_DIR")
             if env_vector_dir:
                 data["vector_store_dir"] = env_vector_dir
 
+        # 从环境变量读取世界观候选数量（如果未在参数中提供）
+        if "world_variants_count" not in data:
+            env_variants_count = os.getenv("WORLD_VARIANTS_COUNT")
+            if env_variants_count:
+                try:
+                    count = int(env_variants_count)
+                    # 限制在 2-5 范围内，超出范围使用边界值
+                    data["world_variants_count"] = max(2, min(5, count))
+                except ValueError:
+                    pass  # 无效值，使用默认值 3
+
         super().__init__(**data)
+        
+        # 初始化 Mem0 配置（在 super().__init__ 之后，确保 get_vector_store_dir() 可用）
+        if self.mem0_config is None:
+            mem0_enabled = os.getenv("MEM0_ENABLED", "false").lower() in ("true", "1", "yes", "on")
+            if mem0_enabled:
+                from novelgen.models import Mem0Config
+
+                # 读取重试相关的环境变量
+                request_timeout = int(os.getenv("MEM0_REQUEST_TIMEOUT", "30"))
+                max_retries = int(os.getenv("MEM0_MAX_RETRIES", "3"))
+                retry_backoff_factor = float(os.getenv("MEM0_RETRY_BACKOFF_FACTOR", "2.0"))
+                
+                # 读取 LLM 相关的环境变量（温度默认 0.0 以获得更稳定的 JSON 输出）
+                llm_temperature = float(os.getenv("MEM0_LLM_TEMPERATURE", "0.0"))
+                llm_max_tokens = int(os.getenv("MEM0_LLM_MAX_TOKENS", "2000"))
+                
+                # 读取并行处理相关的环境变量
+                parallel_workers = int(os.getenv("MEM0_PARALLEL_WORKERS", "5"))
+
+                self.mem0_config = Mem0Config(
+                    enabled=True,
+                    chroma_path=self.get_vector_store_dir(),
+                    api_key=os.getenv("MEM0_API_KEY"),
+                    # Mem0 LLM 配置（用于记忆处理）
+                    # 优先使用 MEM0_LLM_* 环境变量，否则使用通用配置
+                    llm_model_name=os.getenv("MEM0_LLM_MODEL_NAME") or os.getenv("OPENAI_MODEL_NAME"),
+                    llm_api_key=os.getenv("MEM0_LLM_API_KEY") or os.getenv("OPENAI_API_KEY"),
+                    llm_base_url=os.getenv("MEM0_LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL") or os.getenv("OPENAI_API_BASE"),
+                    llm_temperature=llm_temperature,
+                    llm_max_tokens=llm_max_tokens,
+                    # 重试配置
+                    request_timeout=request_timeout,
+                    max_retries=max_retries,
+                    retry_backoff_factor=retry_backoff_factor,
+                    # 并行处理配置
+                    parallel_workers=parallel_workers,
+                )
 
     # 各个链的配置，设置不同的chain_name
     world_chain_config: ChainConfig = Field(
@@ -254,14 +292,28 @@ class ProjectConfig(BaseModel):
         default_factory=EmbeddingConfig,
         description="Embedding模型配置"
     )
+    mem0_config: Optional["Mem0Config"] = Field(
+        default=None,
+        description="Mem0 配置（必需，设置 MEM0_ENABLED=true 启用）"
+    )
 
     @property
     def world_file(self) -> str:
         return os.path.join(self.project_dir, "world.json")
 
     @property
+    def world_variants_file(self) -> str:
+        """世界观候选文件路径"""
+        return os.path.join(self.project_dir, "world_variants.json")
+
+    @property
     def theme_conflict_file(self) -> str:
         return os.path.join(self.project_dir, "theme_conflict.json")
+
+    @property
+    def theme_conflict_variants_file(self) -> str:
+        """主题冲突候选文件路径"""
+        return os.path.join(self.project_dir, "theme_conflict_variants.json")
 
     @property
     def characters_file(self) -> str:
@@ -283,19 +335,11 @@ class ProjectConfig(BaseModel):
     def consistency_report_file(self) -> str:
         return os.path.join(self.project_dir, "consistency_reports.json")
 
-    def get_db_path(self) -> str:
-        """获取数据库文件路径，如果未设置则返回默认路径"""
-        if self.db_path:
-            # 如果是绝对路径，直接返回
-            if os.path.isabs(self.db_path):
-                return self.db_path
-            # 如果是相对路径，相对于 project_dir
-            return os.path.join(self.project_dir, self.db_path)
-        # 默认使用 project_dir/data/novel.db
-        return os.path.join(self.project_dir, "data", "novel.db")
-
     def get_vector_store_dir(self) -> str:
-        """获取向量存储目录路径，如果未设置则返回默认路径"""
+        """获取向量存储目录路径（用于 Mem0 内部 ChromaDB）
+        
+        如果未设置则返回默认路径 project_dir/data/vectors
+        """
         if self.vector_store_dir:
             # 如果是绝对路径，直接返回
             if os.path.isabs(self.vector_store_dir):
@@ -304,3 +348,13 @@ class ProjectConfig(BaseModel):
             return os.path.join(self.project_dir, self.vector_store_dir)
         # 默认使用 project_dir/data/vectors
         return os.path.join(self.project_dir, "data", "vectors")
+
+
+# 解决前向引用：在所有类定义完成后，导入 Mem0Config 并重建 ProjectConfig 模型
+# 这样 Pydantic 就可以正确解析 mem0_config 字段的类型
+try:
+    from novelgen.models import Mem0Config
+    ProjectConfig.model_rebuild()
+except ImportError:
+    # 如果 models.py 还未定义 Mem0Config（如在测试环境），忽略错误
+    pass

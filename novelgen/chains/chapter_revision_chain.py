@@ -9,18 +9,19 @@ from novelgen.llm import get_llm, get_structured_llm
 from novelgen.chains.output_fixing import LLMJsonRepairOutputParser
 
 
-def create_revision_chain(verbose: bool = False, llm_config=None):
+def create_revision_chain(verbose: bool = False, llm_config=None, show_prompt: bool = True):
     """创建章节修订链
     
     优先使用 structured_output 模式。
-    注：由于此链处理长正文，后续可考虑拆分为“结构 + 正文”两步生成。
+    注：由于此链处理长正文，后续可考虑拆分为"结构 + 正文"两步生成。
     """
     if llm_config is None or llm_config.use_structured_output:
         try:
             structured_llm = get_structured_llm(
                 pydantic_model=GeneratedChapter,
                 config=llm_config,
-                verbose=verbose
+                verbose=verbose,
+                show_prompt=show_prompt
             )
             
             prompt = ChatPromptTemplate.from_messages([
@@ -85,7 +86,7 @@ def create_revision_chain(verbose: bool = False, llm_config=None):
         except Exception as e:
             print(f"⚠️  structured_output 模式初始化失败，退回传统解析路径: {e}")
     
-    llm = get_llm(config=llm_config, verbose=verbose)
+    llm = get_llm(config=llm_config, verbose=verbose, show_prompt=show_prompt)
     base_parser = PydanticOutputParser[GeneratedChapter](pydantic_object=GeneratedChapter)
     parser = LLMJsonRepairOutputParser[GeneratedChapter](parser=base_parser, llm=llm)
 
@@ -154,7 +155,8 @@ def revise_chapter(
     original_chapter: GeneratedChapter,
     revision_notes: str,
     verbose: bool = False,
-    llm_config=None
+    llm_config=None,
+    show_prompt: bool = True
 ) -> GeneratedChapter:
     """
     修订章节（结构化输出版本）
@@ -164,11 +166,12 @@ def revise_chapter(
         revision_notes: 修订说明文本
         verbose: 是否显示详细日志
         llm_config: LLM 配置
+        show_prompt: verbose 模式下是否显示完整提示词
 
     Returns:
         修订后的 GeneratedChapter 对象
     """
-    chain = create_revision_chain(verbose=verbose, llm_config=llm_config)
+    chain = create_revision_chain(verbose=verbose, llm_config=llm_config, show_prompt=show_prompt)
 
     # 将原始章节转为 JSON 字符串传入
     original_chapter_json = original_chapter.model_dump_json(indent=2, ensure_ascii=False)

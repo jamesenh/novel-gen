@@ -11,15 +11,25 @@ NovelGen 是一个 从零开始构建 AI 自动写小说的项目，目标不仅
 
 🧱 严格结构化的输出（Pydantic + JSON）
 
-⚙️ 全流程基于 LangChain 构建，可拓展性强
+⚙️ 全流程基于 **LangChain + LangGraph** 构建，可拓展性强，支持复杂工作流
 
 🔁 支持章节摘要、全书摘要、场景级生成
 
-🔍 内置“文本自检”，避免设定冲突
+🔍 内置"文本自检"，避免设定冲突
 
-🧩 模块化设计，可按需替换链路
+🧩 模块化设计，可按需替换链路，每个步骤作为LangGraph节点独立运行
 
-🔧 非常适合学习 LangChain：Runnable、PromptTemplate、Structured Output、VectorStore（可选）
+🧠 **Mem0 智能记忆层**（可选）：
+   - **用户记忆**：预留功能框架，支持主动设置写作偏好和风格
+   - **实体记忆**：自动管理角色状态，智能合并和更新
+   - **零部署成本**：复用现有 ChromaDB，无需额外向量数据库
+
+🔧 非常适合学习：
+   - LangChain 1.0+：Runnable、PromptTemplate、Structured Output、VectorStore
+   - LangGraph 1.0+：Stateful workflows、graph-based orchestration、state management
+   - Mem0：智能记忆管理、自动去重、冲突解决
+
+🔬 支持 checkpointing 和状态持久化，可中途暂停/恢复生成
 
 ## 🧩 项目目录结构
 ```
@@ -29,16 +39,17 @@ novelgen/
     models.py             # 所有数据结构(Pydantic)
     llm.py                # LangChain LLM 初始化
     chains/
-      world_chain.py
-      theme_conflict_chain.py
-      characters_chain.py
-      outline_chain.py
-      chapters_plan_chain.py
-      scene_text_chain.py
-    runtime/
-      orchestrator.py     # 主流程调度
-      summary.py          # 章节/全书摘要
-      revision.py         # 修订机制
+        world_chain.py
+        theme_conflict_chain.py
+        characters_chain.py
+        outline_chain.py
+        chapters_plan_chain.py
+        scene_text_chain.py
+      runtime/
+        orchestrator.py     # 当前主流程调度（将逐步迁移到LangGraph）
+        workflow.py         # LangGraph工作流定义（新的主流程调度）
+        summary.py          # 章节/全书摘要
+        revision.py         # 修订机制
   projects/
     demo_001/
       settings.json
@@ -88,6 +99,28 @@ cp .env.template .env
 ```
 
 详细的环境配置说明请参考 [ENV_SETUP.md](ENV_SETUP.md)。
+
+#### 3. 启用 Mem0（可选）
+
+Mem0 是一个智能记忆层，可以学习用户的写作偏好并自动管理角色状态。
+
+在 `.env` 文件中添加：
+
+```bash
+# 启用 Mem0
+MEM0_ENABLED=true
+
+# OpenAI API Key（必需，用于 Embedding）
+OPENAI_API_KEY=sk-your-actual-api-key-here
+```
+
+**特性**：
+- ✅ 零额外部署：复用现有 ChromaDB
+- ✅ 用户偏好：预留功能框架，支持主动设置写作偏好
+- ✅ 智能管理：自动合并和更新角色状态
+- ✅ 向后兼容：禁用后不影响现有功能
+
+详细配置请参考 [Mem0 设置指南](docs/mem0-setup.md)。
 
 ## ▶️ 运行示例
 python -m novelgen.runtime.orchestrator \
