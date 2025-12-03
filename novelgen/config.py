@@ -179,6 +179,10 @@ class ProjectConfig(BaseModel):
         default=None,
         description="Mem0 内部 ChromaDB 存储目录，默认使用 project_dir/data/vectors。",
     )
+    world_variants_count: int = Field(
+        default=3,
+        description="世界观候选生成数量（2-5），通过 WORLD_VARIANTS_COUNT 环境变量配置"
+    )
 
     def __init__(self, **data):
         # 从环境变量读取 revision_policy（如果未在参数中提供）
@@ -192,6 +196,17 @@ class ProjectConfig(BaseModel):
             env_vector_dir = os.getenv("NOVELGEN_VECTOR_STORE_DIR")
             if env_vector_dir:
                 data["vector_store_dir"] = env_vector_dir
+
+        # 从环境变量读取世界观候选数量（如果未在参数中提供）
+        if "world_variants_count" not in data:
+            env_variants_count = os.getenv("WORLD_VARIANTS_COUNT")
+            if env_variants_count:
+                try:
+                    count = int(env_variants_count)
+                    # 限制在 2-5 范围内，超出范围使用边界值
+                    data["world_variants_count"] = max(2, min(5, count))
+                except ValueError:
+                    pass  # 无效值，使用默认值 3
 
         super().__init__(**data)
         
@@ -287,8 +302,18 @@ class ProjectConfig(BaseModel):
         return os.path.join(self.project_dir, "world.json")
 
     @property
+    def world_variants_file(self) -> str:
+        """世界观候选文件路径"""
+        return os.path.join(self.project_dir, "world_variants.json")
+
+    @property
     def theme_conflict_file(self) -> str:
         return os.path.join(self.project_dir, "theme_conflict.json")
+
+    @property
+    def theme_conflict_variants_file(self) -> str:
+        """主题冲突候选文件路径"""
+        return os.path.join(self.project_dir, "theme_conflict_variants.json")
 
     @property
     def characters_file(self) -> str:

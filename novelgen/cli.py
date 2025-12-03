@@ -7,6 +7,7 @@ NovelGen CLI 工具
 更新: 2025-11-29 - 添加 SIGINT 信号处理，支持 Ctrl+C 优雅退出
 更新: 2025-11-30 - 添加退出调试日志，帮助定位程序卡顿问题
 """
+from novelgen.models import ThemeConflictVariant, WorldVariant
 import os
 import sys
 import json
@@ -151,15 +152,74 @@ def save_json_file(filepath: str, data: dict):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+def ensure_settings_file(project_name: str, world_description: str = "") -> str:
+    """确保项目有 settings.json 文件，如果不存在则创建
+    
+    Args:
+        project_name: 项目名称
+        world_description: 世界观描述（可选）
+    
+    Returns:
+        settings.json 文件路径
+    """
+    project_dir = get_project_dir(project_name)
+    settings_file = os.path.join(project_dir, "settings.json")
+    
+    if not os.path.exists(settings_file):
+        # 创建项目目录
+        os.makedirs(project_dir, exist_ok=True)
+        os.makedirs(os.path.join(project_dir, "chapters"), exist_ok=True)
+        
+        # 创建基本的 settings.json
+        settings_data = {
+            "project_name": project_name,
+            "author": "Jamesenh",
+            "world_description": world_description,
+            "theme_description": "",
+            "initial_chapters": 3,
+            "max_chapters": 50
+        }
+        save_json_file(settings_file, settings_data)
+        rprint(f"[dim]已自动创建项目配置: {settings_file}[/dim]")
+    
+    return settings_file
+
+
+def check_generation_prerequisites(project_dir: str) -> tuple[bool, bool, list[str]]:
+    """检查生成流程的前置条件
+    
+    Args:
+        project_dir: 项目目录路径
+    
+    Returns:
+        (has_world, has_theme, missing_items) 三元组
+    """
+    world_file = os.path.join(project_dir, "world.json")
+    theme_file = os.path.join(project_dir, "theme_conflict.json")
+    
+    has_world = os.path.exists(world_file)
+    has_theme = os.path.exists(theme_file)
+    
+    missing = []
+    if not has_world:
+        missing.append("世界观 (world.json)")
+    if not has_theme:
+        missing.append("主题冲突 (theme_conflict.json)")
+    
+    return has_world, has_theme, missing
+
+
 @app.command()
 def init(
     project_name: Annotated[str, typer.Argument(help="项目名称")],
     chapters: Annotated[int, typer.Option("--chapters", "-c", help="初始章节数")] = 3,
+    no_ai: Annotated[bool, typer.Option("--no-ai", help="跳过 AI 生成世界观候选，直接使用输入描述")] = False,
 ):
     """
     交互式创建新项目
     
-    创建项目目录和 settings.json 配置文件
+    创建项目目录和 settings.json 配置文件。
+    默认会让 AI 根据简短提示生成多个世界观候选供选择。
     """
     project_dir = get_project_dir(project_name)
     settings_file = os.path.join(project_dir, "settings.json")
@@ -174,19 +234,181 @@ def init(
     
     rprint(f"\n[bold cyan]📝 创建新项目: {project_name}[/bold cyan]\n")
     
-    # 交互式输入世界观描述（使用 Rich Prompt 替代 typer.prompt，更好地支持中文输入）
+    # 交互式输入世界观描述
     rprint("[bold]请输入世界观描述[/bold]")
-    rprint("[dim]（描述你想要的小说世界背景，包括时代、地点、社会制度等）[/dim]")
-    world_description = Prompt.ask("世界观")
-    
-    # 交互式输入主题描述（可选）
-    rprint("\n[bold]请输入主题描述（可选）[/bold]")
-    rprint("[dim]（描述故事的核心主题和冲突，直接回车跳过）[/dim]")
-    theme_description = Prompt.ask("主题", default="")
+    rprint("[dim]（可以是简短提示如「修仙世界」，AI 会帮你扩展生成多个候选）[/dim]")
+    world_input = Prompt.ask("世界观")
     
     # 创建项目目录
     os.makedirs(project_dir, exist_ok=True)
     os.makedirs(os.path.join(project_dir, "chapters"), exist_ok=True)
+    
+    world_description = world_input
+    selected_world = None
+    
+    # AI 生成世界观候选
+    if not no_ai:
+        use_ai = Confirm.ask("\n是否让 AI 生成多个世界观候选供选择？", default=True)
+        
+        if use_ai:
+            from novelgen.chains.world_chain import generate_world_variants, save_world_variants, select_world_variant
+            from rich.table import Table
+            
+            # 询问是否需要 AI 扩写
+            expand = Confirm.ask("是否先让 AI 扩写你的描述？", default=len(world_input) < 50)
+            
+            try:
+                rprint("")
+                with console.status("[bold green]正在生成世界观候选...[/bold green]"):
+                    result = generate_world_variants(
+                        user_input=world_input,
+                        expand=expand,
+                        verbose=False
+                    )
+                
+                # 保存候选
+                save_world_variants(result, project_dir)
+                
+                # 显示候选
+                rprint(f"\n[green]✅ 生成了 {len(result.variants)} 个世界观候选[/green]\n")
+                
+                if result.expanded_prompt:
+                    rprint("[bold]📝 AI 扩写结果:[/bold]")
+                    rprint(f"[dim]{result.expanded_prompt[:150]}...[/dim]\n")
+                
+                # 创建候选表格
+                table = Table(show_header=True, header_style="bold")
+                table.add_column("序号", style="cyan", width=4)
+                table.add_column("风格", width=12)
+                table.add_column("世界名称", width=15)
+                table.add_column("简介", width=60, no_wrap=False)
+                
+                for i, v in enumerate[WorldVariant](result.variants, 1):
+                    table.add_row(
+                        str(i),
+                        v.style_tag,
+                        v.world_setting.world_name,
+                        v.brief_description
+                    )
+                
+                console.print(table)
+                
+                # 让用户选择
+                rprint("\n[bold]请选择一个世界观候选（输入序号）[/bold]")
+                rprint("[dim]（输入 0 放弃选择，使用原始描述）[/dim]")
+                
+                while True:
+                    choice = Prompt.ask("选择", default="1")
+                    try:
+                        choice_num = int(choice)
+                        if choice_num == 0:
+                            rprint("[dim]已跳过 AI 候选，使用原始描述[/dim]")
+                            break
+                        elif 1 <= choice_num <= len(result.variants):
+                            variant = result.variants[choice_num - 1]
+                            selected_world = select_world_variant(
+                                variants_result=result,
+                                variant_id=variant.variant_id,
+                                project_dir=project_dir
+                            )
+                            world_description = result.expanded_prompt or world_input
+                            rprint(f"\n[green]✅ 已选择: {variant.style_tag} - {selected_world.world_name}[/green]")
+                            break
+                        else:
+                            rprint(f"[red]请输入 0-{len(result.variants)} 之间的数字[/red]")
+                    except ValueError:
+                        rprint("[red]请输入有效的数字[/red]")
+                
+            except Exception as e:
+                rprint(f"\n[yellow]⚠️ AI 生成失败: {e}[/yellow]")
+                rprint("[dim]将使用原始描述继续[/dim]")
+    
+    # 交互式输入主题描述（可选）
+    rprint("\n[bold]请输入主题描述（可选）[/bold]")
+    rprint("[dim]（描述故事的核心主题，直接回车让 AI 根据世界观自动生成）[/dim]")
+    theme_input = Prompt.ask("主题", default="")
+    
+    theme_description = theme_input
+    selected_theme = None
+    
+    # AI 生成主题冲突候选
+    if selected_world and not no_ai:
+        use_theme_ai = Confirm.ask("\n是否让 AI 生成多个主题冲突候选供选择？", default=True)
+        
+        if use_theme_ai:
+            from novelgen.chains.theme_conflict_chain import (
+                generate_theme_conflict_variants, 
+                save_theme_conflict_variants, 
+                select_theme_conflict_variant
+            )
+            from novelgen.models import ThemeConflict
+            from rich.table import Table
+            
+            try:
+                rprint("")
+                with console.status("[bold green]正在生成主题冲突候选...[/bold green]"):
+                    theme_result = generate_theme_conflict_variants(
+                        world_setting=selected_world,
+                        user_direction=theme_input if theme_input else None,
+                        verbose=False
+                    )
+                
+                # 保存候选
+                from novelgen.config import ProjectConfig
+                config = ProjectConfig(project_dir=project_dir)
+                save_theme_conflict_variants(theme_result, config.theme_conflict_variants_file)
+                
+                # 显示候选
+                rprint(f"\n[green]✅ 生成了 {len(theme_result.variants)} 个主题冲突候选[/green]\n")
+                
+                # 创建候选表格
+                table = Table(show_header=True, header_style="bold")
+                table.add_column("序号", style="cyan", width=4)
+                table.add_column("风格", width=12)
+                table.add_column("核心主题", width=15)
+                table.add_column("简介", width=60, no_wrap=False)
+                
+                for i, v in enumerate[ThemeConflictVariant](theme_result.variants, 1):
+                    table.add_row(
+                        str(i),
+                        v.style_tag,
+                        v.theme_conflict.core_theme[:13] + "..." if len(v.theme_conflict.core_theme) > 13 else v.theme_conflict.core_theme,
+                        v.brief_description
+                    )
+                
+                console.print(table)
+                
+                # 让用户选择
+                rprint("\n[bold]请选择一个主题冲突候选（输入序号）[/bold]")
+                rprint("[dim]（输入 0 放弃选择，后续自动生成）[/dim]")
+                
+                while True:
+                    choice = Prompt.ask("选择", default="1")
+                    try:
+                        choice_num = int(choice)
+                        if choice_num == 0:
+                            rprint("[dim]已跳过 AI 候选，后续将自动生成主题冲突[/dim]")
+                            break
+                        elif 1 <= choice_num <= len(theme_result.variants):
+                            variant = theme_result.variants[choice_num - 1]
+                            selected_theme = select_theme_conflict_variant(
+                                variants_result=theme_result,
+                                variant_id=variant.variant_id
+                            )
+                            # 保存选中的主题冲突
+                            theme_file = os.path.join(project_dir, "theme_conflict.json")
+                            save_json_file(theme_file, selected_theme.model_dump())
+                            theme_description = theme_input or f"由 AI 自动生成: {variant.style_tag}"
+                            rprint(f"\n[green]✅ 已选择: {variant.style_tag} - {selected_theme.core_theme}[/green]")
+                            break
+                        else:
+                            rprint(f"[red]请输入 0-{len(theme_result.variants)} 之间的数字[/red]")
+                    except ValueError:
+                        rprint("[red]请输入有效的数字[/red]")
+                
+            except Exception as e:
+                rprint(f"\n[yellow]⚠️ AI 生成主题冲突失败: {e}[/yellow]")
+                rprint("[dim]后续将自动生成主题冲突[/dim]")
     
     # 创建 settings.json
     settings_data = {
@@ -204,7 +426,18 @@ def init(
     rprint(f"   📁 项目目录: {project_dir}")
     rprint(f"   📄 配置文件: {settings_file}")
     rprint(f"   📖 初始章节: {chapters} 章")
-    rprint(f"\n[dim]运行 'ng run {project_name}' 开始生成小说[/dim]")
+    
+    if selected_world:
+        rprint(f"   🌍 世界观: {selected_world.world_name}")
+    if selected_theme:
+        rprint(f"   🎭 主题: {selected_theme.core_theme}")
+    
+    if selected_world and selected_theme:
+        rprint(f"\n[dim]运行 'ng run {project_name}' 开始生成小说（已有世界观和主题冲突）[/dim]")
+    elif selected_world:
+        rprint(f"\n[dim]运行 'ng run {project_name}' 开始生成小说（已有世界观）[/dim]")
+    else:
+        rprint(f"\n[dim]运行 'ng run {project_name}' 开始生成小说[/dim]")
 
 
 @app.command()
@@ -213,17 +446,43 @@ def run(
     stop_at: Annotated[Optional[StopStep], typer.Option("--stop-at", "-s", help="停止在指定步骤")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="详细输出模式")] = False,
     no_prompt: Annotated[bool, typer.Option("--no-prompt", help="verbose 模式下不显示完整提示词")] = False,
+    skip_check: Annotated[bool, typer.Option("--skip-check", help="跳过世界观和主题冲突检查")] = False,
 ):
     """
     运行小说生成工作流
     
-    执行完整的小说生成流程，或停止在指定步骤
+    执行完整的小说生成流程，或停止在指定步骤。
+    默认会检查世界观和主题冲突是否已选择，使用 --skip-check 可跳过检查。
     """
     # 检查项目是否存在
     if not project_exists(project_name):
         rprint(f"[red]❌ 项目 '{project_name}' 不存在[/red]")
         rprint(f"[dim]请先运行 'ng init {project_name}' 创建项目[/dim]")
+        rprint(f"[dim]或使用 'ng world-variants {project_name} --prompt \"你的世界观\"' 开始[/dim]")
         raise typer.Exit(1)
+    
+    project_dir = get_project_dir(project_name)
+    
+    # 检查前置条件（世界观和主题冲突）
+    if not skip_check:
+        has_world, has_theme, missing = check_generation_prerequisites(project_dir)
+        
+        if missing:
+            rprint(f"[yellow]⚠️  项目缺少必要的生成前置条件:[/yellow]")
+            for item in missing:
+                rprint(f"   - {item}")
+            
+            rprint("")
+            
+            if not has_world:
+                rprint(f"[dim]请先运行: ng world-variants {project_name} --prompt \"你的世界观提示\"[/dim]")
+                rprint(f"[dim]然后运行: ng world-select {project_name} <variant_id>[/dim]")
+            elif not has_theme:
+                rprint(f"[dim]请先运行: ng theme-variants {project_name}[/dim]")
+                rprint(f"[dim]然后运行: ng theme-select {project_name} <variant_id>[/dim]")
+            
+            rprint(f"\n[dim]或使用 --skip-check 跳过此检查（工作流会自动生成缺失部分）[/dim]")
+            raise typer.Exit(1)
     
     # 重置中断状态（每次运行开始时重置）
     _reset_interrupt_state()
@@ -591,6 +850,386 @@ class RollbackStep(str, Enum):
     characters = "characters"
     outline = "outline"
     chapters_plan = "chapters_plan"
+
+
+# ==================== 世界观多候选生成命令 ====================
+
+
+@app.command("world-variants")
+def world_variants_cmd(
+    project_name: Annotated[str, typer.Argument(help="项目名称")],
+    prompt: Annotated[Optional[str], typer.Option("--prompt", "-p", help="世界观提示（不指定则从 settings.json 读取）")] = None,
+    count: Annotated[Optional[int], typer.Option("--count", "-c", help="候选数量（2-5）")] = None,
+    expand: Annotated[bool, typer.Option("--expand", "-e", help="先将简短提示扩写为详细描述")] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="详细输出模式")] = False,
+):
+    """
+    生成多个世界观候选供选择
+    
+    根据简短提示生成多个风格各异的世界观候选方案。
+    如果项目不存在，会自动创建项目目录和配置文件。
+    
+    示例:
+      ng world-variants demo_001 --prompt "修仙世界"
+      ng world-variants demo_001 --prompt "赛博朋克" --expand --count 4
+    """
+    project_dir = get_project_dir(project_name)
+    
+    # 确定世界观提示
+    if prompt is None:
+        # 从 settings.json 读取
+        settings = load_json_file(os.path.join(project_dir, "settings.json"))
+        if settings and settings.get("world_description"):
+            prompt = settings["world_description"]
+        else:
+            rprint("[red]❌ 未指定世界观提示[/red]")
+            rprint(f"[dim]请使用 --prompt 指定世界观提示[/dim]")
+            raise typer.Exit(1)
+    
+    # 确保项目有 settings.json
+    ensure_settings_file(project_name, world_description=prompt)
+    
+    rprint(f"\n[bold cyan]🌍 生成世界观候选: {project_name}[/bold cyan]\n")
+    rprint(f"[dim]提示: {prompt[:50]}{'...' if len(prompt) > 50 else ''}[/dim]")
+    
+    if expand:
+        rprint("[dim]模式: AI 扩写 + 多候选生成[/dim]")
+    else:
+        rprint("[dim]模式: 直接多候选生成[/dim]")
+    
+    rprint("")
+    
+    from novelgen.chains.world_chain import generate_world_variants, save_world_variants
+    
+    try:
+        with console.status("[bold green]正在生成世界观候选...[/bold green]"):
+            result = generate_world_variants(
+                user_input=prompt,
+                num_variants=count,
+                expand=expand,
+                verbose=verbose
+            )
+        
+        # 保存候选到文件
+        os.makedirs(project_dir, exist_ok=True)
+        variants_file = save_world_variants(result, project_dir)
+        
+        # 显示结果
+        rprint(f"\n[green]✅ 生成了 {len(result.variants)} 个世界观候选[/green]\n")
+        
+        if result.expanded_prompt:
+            rprint("[bold]📝 AI 扩写结果:[/bold]")
+            rprint(f"[dim]{result.expanded_prompt[:200]}...[/dim]\n")
+        
+        # 创建候选表格
+        from rich.table import Table
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("ID", style="cyan", width=10)
+        table.add_column("风格", width=12)
+        table.add_column("世界名称", width=15)
+        table.add_column("简介", width=40)
+        
+        for v in result.variants:
+            table.add_row(
+                v.variant_id,
+                v.style_tag,
+                v.world_setting.world_name,
+                v.brief_description[:38] + "..." if len(v.brief_description) > 38 else v.brief_description
+            )
+        
+        console.print(table)
+        
+        rprint(f"\n[dim]候选已保存到: {variants_file}[/dim]")
+        rprint(f"[dim]使用 'ng world-select {project_name} <variant_id>' 选择候选[/dim]")
+        
+    except Exception as e:
+        rprint(f"\n[red]❌ 生成失败: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command("world-select")
+def world_select_cmd(
+    project_name: Annotated[str, typer.Argument(help="项目名称")],
+    variant_id: Annotated[str, typer.Argument(help="要选择的候选 ID（如 variant_1）")],
+):
+    """
+    从候选中选择世界观
+    
+    选择一个世界观候选并保存为项目的正式世界观。
+    
+    示例:
+      ng world-select demo_001 variant_2
+    """
+    project_dir = get_project_dir(project_name)
+    
+    from novelgen.chains.world_chain import load_world_variants, select_world_variant
+    
+    # 加载候选
+    variants_result = load_world_variants(project_dir)
+    
+    if variants_result is None:
+        rprint(f"[red]❌ 未找到世界观候选[/red]")
+        rprint(f"[dim]请先运行 'ng world-variants {project_name}' 生成候选[/dim]")
+        raise typer.Exit(1)
+    
+    try:
+        # 选择候选
+        world_setting = select_world_variant(
+            variants_result=variants_result,
+            variant_id=variant_id,
+            project_dir=project_dir
+        )
+        
+        rprint(f"\n[green]✅ 已选择世界观: {world_setting.world_name}[/green]")
+        rprint(f"[dim]已保存到: {os.path.join(project_dir, 'world.json')}[/dim]")
+        rprint(f"\n[dim]现在可以运行 'ng run {project_name}' 继续生成流程[/dim]")
+        
+    except ValueError as e:
+        rprint(f"[red]❌ 选择失败: {e}[/red]")
+        
+        # 显示可用的候选
+        rprint("\n[bold]可用的候选:[/bold]")
+        for v in variants_result.variants:
+            rprint(f"  - {v.variant_id}: {v.style_tag} - {v.world_setting.world_name}")
+        
+        raise typer.Exit(1)
+
+
+@app.command("world-show")
+def world_show_cmd(
+    project_name: Annotated[str, typer.Argument(help="项目名称")],
+):
+    """
+    显示已保存的世界观候选详情
+    
+    查看所有候选的详细信息，帮助做出选择。
+    """
+    project_dir = get_project_dir(project_name)
+    
+    from novelgen.chains.world_chain import load_world_variants
+    
+    # 加载候选
+    variants_result = load_world_variants(project_dir)
+    
+    if variants_result is None:
+        rprint(f"[red]❌ 未找到世界观候选[/red]")
+        rprint(f"[dim]请先运行 'ng world-variants {project_name}' 生成候选[/dim]")
+        raise typer.Exit(1)
+    
+    rprint(f"\n[bold cyan]🌍 世界观候选详情: {project_name}[/bold cyan]\n")
+    rprint(f"[dim]原始提示: {variants_result.original_prompt}[/dim]")
+    
+    if variants_result.expanded_prompt:
+        rprint(f"[dim]扩写描述: {variants_result.expanded_prompt[:100]}...[/dim]")
+    
+    rprint(f"[dim]生成时间: {variants_result.generated_at}[/dim]\n")
+    
+    for i, v in enumerate(variants_result.variants):
+        rprint(f"[bold]{'─' * 60}[/bold]")
+        rprint(f"[bold cyan]{v.variant_id}[/bold cyan] - [bold]{v.style_tag}[/bold]")
+        rprint(f"[bold]世界名称:[/bold] {v.world_setting.world_name}")
+        rprint(f"[bold]时代背景:[/bold] {v.world_setting.time_period}")
+        rprint(f"[bold]地理环境:[/bold] {v.world_setting.geography[:80]}...")
+        rprint(f"[bold]社会制度:[/bold] {v.world_setting.social_system[:80]}...")
+        if v.world_setting.power_system:
+            rprint(f"[bold]力量体系:[/bold] {v.world_setting.power_system[:80]}...")
+        rprint(f"\n[bold]简介:[/bold] {v.brief_description}\n")
+    
+    rprint(f"[bold]{'─' * 60}[/bold]")
+    rprint(f"\n[dim]使用 'ng world-select {project_name} <variant_id>' 选择候选[/dim]")
+
+
+# ==================== 主题冲突多候选生成命令 ====================
+
+
+@app.command("theme-variants")
+def theme_variants_cmd(
+    project_name: Annotated[str, typer.Argument(help="项目名称")],
+    direction: Annotated[Optional[str], typer.Option("--direction", "-d", help="主题方向提示（如 '复仇'、'爱情'）")] = None,
+    count: Annotated[Optional[int], typer.Option("--count", "-c", help="候选数量（2-5）")] = None,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="详细输出模式")] = False,
+):
+    """
+    生成多个主题冲突候选供选择
+    
+    根据世界观自动推导，或结合用户的主题方向生成多个风格各异的主题冲突候选方案。
+    需要先完成世界观选择（world.json 存在）。
+    
+    示例:
+      ng theme-variants demo_001
+      ng theme-variants demo_001 --direction "复仇"
+      ng theme-variants demo_001 --direction "爱情与背叛" --count 4
+    """
+    project_dir = get_project_dir(project_name)
+    
+    # 检查世界观文件
+    world_file = os.path.join(project_dir, "world.json")
+    if not os.path.exists(world_file):
+        rprint(f"[red]❌ 未找到世界观文件[/red]")
+        rprint(f"[dim]请先运行 'ng world-variants {project_name} --prompt \"你的世界观提示\"' 并选择世界观[/dim]")
+        raise typer.Exit(1)
+    
+    # 确保项目有 settings.json
+    ensure_settings_file(project_name)
+    
+    # 加载世界观
+    from novelgen.models import WorldSetting
+    world_data = load_json_file(world_file)
+    world_setting = WorldSetting(**world_data)
+    
+    rprint(f"\n[bold cyan]🎭 生成主题冲突候选: {project_name}[/bold cyan]\n")
+    rprint(f"[dim]世界观: {world_setting.world_name}[/dim]")
+    if direction:
+        rprint(f"[dim]主题方向: {direction}[/dim]")
+    else:
+        rprint("[dim]主题方向: 由 AI 自动推导[/dim]")
+    rprint("")
+    
+    from novelgen.chains.theme_conflict_chain import generate_theme_conflict_variants, save_theme_conflict_variants
+    from novelgen.config import ProjectConfig
+    
+    try:
+        with console.status("[bold green]正在生成主题冲突候选...[/bold green]"):
+            result = generate_theme_conflict_variants(
+                world_setting=world_setting,
+                user_direction=direction,
+                num_variants=count,
+                verbose=verbose
+            )
+        
+        # 保存候选到文件
+        config = ProjectConfig(project_dir=project_dir)
+        save_theme_conflict_variants(result, config.theme_conflict_variants_file)
+        
+        # 显示结果
+        rprint(f"\n[green]✅ 生成了 {len(result.variants)} 个主题冲突候选[/green]\n")
+        
+        # 创建候选表格
+        from rich.table import Table
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("ID", style="cyan", width=10)
+        table.add_column("风格", width=12)
+        table.add_column("核心主题", width=15)
+        table.add_column("简介", width=40)
+        
+        for v in result.variants:
+            table.add_row(
+                v.variant_id,
+                v.style_tag,
+                v.theme_conflict.core_theme[:13] + "..." if len(v.theme_conflict.core_theme) > 13 else v.theme_conflict.core_theme,
+                v.brief_description[:38] + "..." if len(v.brief_description) > 38 else v.brief_description
+            )
+        
+        console.print(table)
+        
+        rprint(f"\n[dim]候选已保存到: {config.theme_conflict_variants_file}[/dim]")
+        rprint(f"[dim]使用 'ng theme-select {project_name} <variant_id>' 选择候选[/dim]")
+        
+    except Exception as e:
+        rprint(f"\n[red]❌ 生成失败: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command("theme-select")
+def theme_select_cmd(
+    project_name: Annotated[str, typer.Argument(help="项目名称")],
+    variant_id: Annotated[str, typer.Argument(help="要选择的候选 ID（如 variant_1）")],
+):
+    """
+    从候选中选择主题冲突
+    
+    选择一个主题冲突候选并保存为项目的正式主题冲突。
+    
+    示例:
+      ng theme-select demo_001 variant_2
+    """
+    project_dir = get_project_dir(project_name)
+    
+    from novelgen.chains.theme_conflict_chain import load_theme_conflict_variants, select_theme_conflict_variant
+    from novelgen.config import ProjectConfig
+    
+    config = ProjectConfig(project_dir=project_dir)
+    
+    # 加载候选
+    try:
+        variants_result = load_theme_conflict_variants(config.theme_conflict_variants_file)
+    except FileNotFoundError:
+        rprint(f"[red]❌ 未找到主题冲突候选[/red]")
+        rprint(f"[dim]请先运行 'ng theme-variants {project_name}' 生成候选[/dim]")
+        raise typer.Exit(1)
+    
+    try:
+        # 选择候选
+        theme_conflict = select_theme_conflict_variant(
+            variants_result=variants_result,
+            variant_id=variant_id
+        )
+        
+        # 保存选中的主题冲突
+        theme_file = os.path.join(project_dir, "theme_conflict.json")
+        save_json_file(theme_file, theme_conflict.model_dump())
+        
+        rprint(f"\n[green]✅ 已选择主题冲突: {theme_conflict.core_theme}[/green]")
+        rprint(f"[dim]已保存到: {theme_file}[/dim]")
+        rprint(f"\n[dim]现在可以运行 'ng run {project_name}' 继续生成流程[/dim]")
+        
+    except ValueError as e:
+        rprint(f"[red]❌ 选择失败: {e}[/red]")
+        
+        # 显示可用的候选
+        rprint("\n[bold]可用的候选:[/bold]")
+        for v in variants_result.variants:
+            rprint(f"  - {v.variant_id}: {v.style_tag} - {v.theme_conflict.core_theme}")
+        
+        raise typer.Exit(1)
+
+
+@app.command("theme-show")
+def theme_show_cmd(
+    project_name: Annotated[str, typer.Argument(help="项目名称")],
+):
+    """
+    显示已保存的主题冲突候选详情
+    
+    查看所有候选的详细信息，帮助做出选择。
+    """
+    project_dir = get_project_dir(project_name)
+    
+    from novelgen.chains.theme_conflict_chain import load_theme_conflict_variants
+    from novelgen.config import ProjectConfig
+    
+    config = ProjectConfig(project_dir=project_dir)
+    
+    # 加载候选
+    try:
+        variants_result = load_theme_conflict_variants(config.theme_conflict_variants_file)
+    except FileNotFoundError:
+        rprint(f"[red]❌ 未找到主题冲突候选[/red]")
+        rprint(f"[dim]请先运行 'ng theme-variants {project_name}' 生成候选[/dim]")
+        raise typer.Exit(1)
+    
+    rprint(f"\n[bold cyan]🎭 主题冲突候选详情: {project_name}[/bold cyan]\n")
+    rprint(f"[dim]基于世界观: {variants_result.world_setting_name}[/dim]")
+    
+    if variants_result.user_direction:
+        rprint(f"[dim]用户方向: {variants_result.user_direction}[/dim]")
+    else:
+        rprint("[dim]用户方向: 由 AI 自动推导[/dim]")
+    
+    rprint(f"[dim]生成时间: {variants_result.generated_at}[/dim]\n")
+    
+    for i, v in enumerate(variants_result.variants):
+        rprint(f"[bold]{'─' * 60}[/bold]")
+        rprint(f"[bold cyan]{v.variant_id}[/bold cyan] - [bold]{v.style_tag}[/bold]")
+        rprint(f"[bold]核心主题:[/bold] {v.theme_conflict.core_theme}")
+        rprint(f"[bold]次要主题:[/bold] {', '.join(v.theme_conflict.sub_themes)}")
+        rprint(f"[bold]主要冲突:[/bold] {v.theme_conflict.main_conflict}")
+        rprint(f"[bold]次要冲突:[/bold] {', '.join(v.theme_conflict.sub_conflicts[:2])}...")
+        rprint(f"[bold]作品基调:[/bold] {v.theme_conflict.tone}")
+        rprint(f"\n[bold]简介:[/bold] {v.brief_description}\n")
+    
+    rprint(f"[bold]{'─' * 60}[/bold]")
+    rprint(f"\n[dim]使用 'ng theme-select {project_name} <variant_id>' 选择候选[/dim]")
 
 
 @app.command()

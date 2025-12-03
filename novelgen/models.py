@@ -61,6 +61,32 @@ class WorldSetting(BaseModel):
     special_rules: Optional[str] = Field(default=None, description="特殊规则")
 
 
+class WorldVariant(BaseModel):
+    """世界观候选变体
+    
+    用于多候选生成模式，每个变体包含一个完整的世界观设定和简要描述
+    
+    开发者: Jamesenh, 开发时间: 2025-12-02
+    """
+    variant_id: str = Field(description="唯一标识符（如 variant_1）")
+    style_tag: str = Field(description="风格标签（如「古典仙侠」「都市修真」「末世修仙」）")
+    brief_description: str = Field(description="50-100字的简要描述")
+    world_setting: WorldSetting = Field(description="完整的世界观设定")
+
+
+class WorldVariantsResult(BaseModel):
+    """世界观多候选生成结果
+    
+    包含多个风格各异的世界观候选，供用户选择
+    
+    开发者: Jamesenh, 开发时间: 2025-12-02
+    """
+    original_prompt: str = Field(description="用户原始输入的简短提示")
+    expanded_prompt: Optional[str] = Field(default=None, description="AI 扩写后的详细描述（如使用扩写模式）")
+    variants: List[WorldVariant] = Field(description="世界观候选列表")
+    generated_at: str = Field(description="生成时间（ISO格式）")
+
+
 class ThemeConflict(BaseModel):
     """主题与冲突"""
     core_theme: str = Field(description="核心主题")
@@ -68,6 +94,32 @@ class ThemeConflict(BaseModel):
     main_conflict: str = Field(description="主要冲突")
     sub_conflicts: List[str] = Field(description="次要冲突")
     tone: str = Field(description="作品基调")
+
+
+class ThemeConflictVariant(BaseModel):
+    """主题冲突候选变体
+    
+    用于多候选生成模式，每个变体包含一个完整的主题冲突设定和简要描述
+    
+    开发者: Jamesenh, 开发时间: 2025-12-02
+    """
+    variant_id: str = Field(description="唯一标识符（如 variant_1）")
+    style_tag: str = Field(description="风格标签（如「热血成长」「黑暗复仇」「治愈日常」）")
+    brief_description: str = Field(description="50-100字的主题冲突简述")
+    theme_conflict: ThemeConflict = Field(description="完整的主题冲突设定")
+
+
+class ThemeConflictVariantsResult(BaseModel):
+    """主题冲突多候选生成结果
+    
+    包含多个风格各异的主题冲突候选，供用户选择
+    
+    开发者: Jamesenh, 开发时间: 2025-12-02
+    """
+    user_direction: Optional[str] = Field(default=None, description="用户输入的主题方向（如有）")
+    world_setting_name: str = Field(description="基于的世界观名称")
+    variants: List[ThemeConflictVariant] = Field(description="主题冲突候选列表")
+    generated_at: str = Field(description="生成时间（ISO格式）")
 
 
 class Character(BaseModel):

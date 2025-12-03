@@ -198,31 +198,107 @@ def create_novel_generation_workflow(checkpointer=None, project_dir: Optional[st
     workflow = StateGraph[NovelGenerationState, None, NovelGenerationState, NovelGenerationState](NovelGenerationState)
 
     # ==================== 添加节点 ====================
-    # 基础节点
+    
+    # -------------------- 基础节点 --------------------
+    # 这些节点按顺序执行，构成小说生成的主要流程
+    
+    # 加载项目设置节点：从 settings.json 读取配置，初始化 LangGraph 状态
+    # 输入：project_dir（项目目录路径）
+    # 输出：更新 state.settings, state.project_dir
     workflow.add_node("load_settings", load_settings_node)
+    
+    # 世界观生成节点：根据用户描述生成完整的世界观设定
+    # 输入：state.settings.world_description
+    # 输出：state.world (WorldSetting 对象)，保存到 world.json
     workflow.add_node("world_creation", world_creation_node)
+    
+    # 主题冲突生成节点：生成故事的核心主题和冲突设定
+    # 输入：state.settings.theme_description, state.world
+    # 输出：state.theme_conflict (ThemeConflict 对象)，保存到 theme_conflict.json
     workflow.add_node("theme_conflict_creation", theme_conflict_creation_node)
+    
+    # 角色生成节点：生成主角、配角、反派等角色设定
+    # 输入：state.world, state.theme_conflict, state.settings.characters_config
+    # 输出：state.characters (CharactersConfig 对象)，保存到 characters.json
     workflow.add_node("character_creation", character_creation_node)
+    
+    # 大纲生成节点：生成故事的整体结构和章节摘要
+    # 输入：state.world, state.theme_conflict, state.characters
+    # 输出：state.outline (Outline 对象)，保存到 outline.json
     workflow.add_node("outline_creation", outline_creation_node)
+    
+    # 章节计划生成节点：为每个章节生成详细的场景计划
+    # 输入：state.outline, state.characters, state.world
+    # 输出：state.chapters_plan (Dict[int, ChapterPlan])，保存到 chapters/chapter_XXX_plan.json
     workflow.add_node("chapter_planning", chapter_planning_node)
+    
+    # 初始化章节循环节点：设置 current_chapter_number 开始逐章生成
+    # 输入：state.chapters_plan
+    # 输出：state.current_chapter_number = 1 (或断点续跑的章节号)
     workflow.add_node("init_chapter_loop", init_chapter_loop_node)
-    # 使用场景生成包装节点（支持场景级断点续跑）
+    
+    # -------------------- 章节生成循环节点 --------------------
+    # 这些节点在循环中执行，逐章生成小说内容
+    
+    # 章节生成节点（场景级断点续跑版本）：逐场景生成章节内容
+    # 使用子工作流实现场景级别的断点续跑支持
+    # 输入：state.current_chapter_number, state.chapters_plan[n]
+    # 输出：state.chapters[n] (GeneratedChapter 对象)，保存到 chapters/chapter_XXX.json
     workflow.add_node("chapter_generation", scene_generation_wrapper_node)
+    
+    # 一致性检查节点：检查新生成章节与已有内容的一致性
+    # 输入：state.chapters[current], state.characters, state.world
+    # 输出：state.consistency_reports[n] (ConsistencyReport 对象)
     workflow.add_node("consistency_check", consistency_check_node)
+    
+    # 章节修订节点：根据一致性报告修订章节内容
+    # 输入：state.chapters[current], state.consistency_reports[current]
+    # 输出：更新后的 state.chapters[n]
     workflow.add_node("chapter_revision", chapter_revision_node)
+    
+    # 下一章节节点：递增章节号，准备进入下一章生成
+    # 输入：state.current_chapter_number
+    # 输出：state.current_chapter_number += 1
     workflow.add_node("next_chapter", next_chapter_node)
     
-    # 动态章节扩展节点
+    # -------------------- 动态章节扩展节点 --------------------
+    # 当已规划章节全部生成完毕但故事尚未结束时触发
+    
+    # 剧情进度评估节点：评估当前故事进度，决定是否继续扩展
+    # 输入：state.chapters, state.outline
+    # 输出：state.story_progress_evaluation (continue/wrap_up/force_end)
     workflow.add_node("evaluate_story_progress", evaluate_story_progress_node)
+    
+    # 大纲扩展节点：根据评估结果扩展大纲，添加新章节摘要
+    # 输入：state.story_progress_evaluation, state.outline
+    # 输出：更新 state.outline.chapters，添加新的 ChapterSummary
     workflow.add_node("extend_outline", extend_outline_node)
+    
+    # 新章节计划生成节点：为新扩展的章节生成场景计划
+    # 输入：扩展后的 state.outline
+    # 输出：更新 state.chapters_plan，添加新章节的 ChapterPlan
     workflow.add_node("plan_new_chapters", plan_new_chapters_node)
 
-    # 跳过节点（用于条件边路由）
+    # -------------------- 跳过节点（用于条件边路由）--------------------
+    # 当对应数据已存在时，通过这些节点跳过已完成的步骤
+    # 所有跳过节点都使用同一个空操作函数 skip_node
+    
+    # 跳过世界观生成：当 world.json 已存在时触发
     workflow.add_node("skip_world", skip_node)
+    
+    # 跳过主题冲突生成：当 theme_conflict.json 已存在时触发
     workflow.add_node("skip_theme_conflict", skip_node)
+    
+    # 跳过角色生成：当 characters.json 已存在时触发
     workflow.add_node("skip_character", skip_node)
+    
+    # 跳过大纲生成：当 outline.json 已存在时触发
     workflow.add_node("skip_outline", skip_node)
+    
+    # 跳过章节计划生成：当所有章节计划文件都已存在时触发
     workflow.add_node("skip_chapter_planning", skip_node)
+    
+    # 跳过章节生成：当当前章节的内容文件已存在时触发
     workflow.add_node("skip_chapter_generation", skip_node)
 
     # ==================== 定义边和条件边 ====================
