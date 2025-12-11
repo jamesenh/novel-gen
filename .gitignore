@@ -47,3 +47,5 @@ projects/*/
 # Logs
 *.log
 .env.魔搭
+
+node_modules/

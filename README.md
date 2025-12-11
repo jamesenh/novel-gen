@@ -136,3 +136,35 @@ VectorStore + 上下文检索
 自检链：一致性、称谓、角色、世界观规则
 
 修订机制（局部修改 → 自动影响范围）
+
+## 🌐 Web 应用快速上手
+
+### 后端（FastAPI）
+```bash
+# 确保 Redis 已就绪（可用 docker-compose up -d redis）
+UV_CACHE_DIR=.uv-cache uv run uvicorn novelgen.api.main:app --reload
+# 默认监听 http://127.0.0.1:8000
+```
+
+### 前端（Vite + React）
+```bash
+cd frontend
+npm install
+npm run dev  # 默认 http://127.0.0.1:5173
+```
+
+### 常用环境变量
+- `OPENAI_API_KEY`：必填，LLM 调用
+- `REDIS_URL`：Redis 连接串，默认 `redis://localhost:6379/0`
+- `NOVELGEN_PROJECTS_DIR`：项目输出目录，默认 `projects`
+- `MEM0_ENABLED`：是否启用 Mem0 记忆层
+
+### 关键 API（摘要）
+- 项目管理：`GET/POST /api/projects`，`GET/DELETE /api/projects/{name}`，`GET /api/projects/{name}/state`
+- 生成控制：`POST /api/projects/{name}/generate|resume|stop`，`GET /generate/status|progress|logs`
+- 内容读取：`GET /api/projects/{name}/world|characters|outline|chapters|chapters/{num}`
+- 内容编辑：`PUT /api/projects/{name}/world|characters|outline|chapters/{num}`，`DELETE /chapters/{num}[?scene=]`
+- 回滚：`POST /api/projects/{name}/rollback`（step/chapter/scene）
+- 导出：`GET /api/projects/{name}/export/txt|md|json` 以及单章导出 `/.../{chapter_num}`
+
+更多细节见 `docs/web_api.md`。
