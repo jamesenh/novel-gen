@@ -51,14 +51,27 @@ export type WorldView = {
   [k: string]: any;
 };
 
+export type ThemeConflictData = {
+  core_theme?: string;
+  sub_themes?: string[];
+  main_conflict?: string;
+  sub_conflicts?: string[];
+  tone?: string;
+  [k: string]: any;
+};
+
 export type Character = {
   name?: string;
   role?: string;
+  age?: number;
   gender?: string;
   appearance?: string;
   personality?: string;
   background?: string;
   motivation?: string;
+  abilities?: string[];
+  relationships?: Record<string, string>;
+  relationships_brief?: Record<string, string>;
   [k: string]: any;
 };
 
@@ -119,5 +132,31 @@ export type RollbackResult = {
   deleted_files: number;
   cleared_memories: number;
   files: string[];
+};
+
+// ==================== 内容生成相关 ====================
+
+export type ContentTarget = "world" | "theme" | "characters" | "outline";
+
+export type ContentGenerateRequest = {
+  target: ContentTarget;
+  user_prompt?: string;
+  num_variants?: number;
+  num_characters?: number;
+  num_chapters?: number;
+  expand?: boolean;
+};
+
+export type ContentVariant = {
+  variant_id: string;
+  style_tag: string;
+  brief_description: string;
+  payload: Record<string, any>;
+};
+
+export type ContentGenerateResponse = {
+  target: string;
+  variants: ContentVariant[];
+  generated_at: string;
 };
 

@@ -5,16 +5,20 @@
 
 开发者: jamesenh
 日期: 2025-12-08
+更新: 2025-12-11 - 增强删除逻辑，支持 Redis/Mem0/向量存储清理
 """
 import glob
 import json
+import logging
 import os
 import shutil
 from datetime import datetime
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from novelgen.models import GeneratedChapter, Settings
 from novelgen.api.schemas.project import ProjectStepState, ProjectState
+
+logger = logging.getLogger(__name__)
 
 PROJECTS_ROOT = os.getenv("NOVELGEN_PROJECTS_DIR", "projects")
 
@@ -96,6 +100,8 @@ def create_project(data: Dict[str, Any]) -> Dict[str, Any]:
 
     Returns:
         创建后的 settings.json 内容
+        
+    更新: 2025-12-11 - 移除 world_description/theme_description，由独立内容生成接口管理
     """
     project_name = data["project_name"]
     project_dir = os.path.join(PROJECTS_ROOT, project_name)
@@ -104,8 +110,6 @@ def create_project(data: Dict[str, Any]) -> Dict[str, Any]:
     settings = Settings(
         project_name=project_name,
         author="Jamesenh",
-        world_description=data.get("world_description", ""),
-        theme_description=data.get("theme_description", ""),
         initial_chapters=data.get("initial_chapters", 3),
         max_chapters=max(data.get("initial_chapters", 3), 50),
     )
@@ -115,11 +119,114 @@ def create_project(data: Dict[str, Any]) -> Dict[str, Any]:
     return settings.model_dump()
 
 
-def delete_project(project_name: str):
-    """删除项目目录"""
+def delete_project(project_name: str) -> Dict[str, Any]:
+    """
+    删除项目及其所有关联数据
+    
+    清理顺序：
+    1. 停止活跃的生成任务
+    2. 清理 Redis 运行时状态（进度、日志、活跃任务）
+    3. 清理 Mem0 记忆（如果启用）
+    4. 删除项目专属向量存储目录（如果位于项目目录内）
+    5. 删除项目文件目录
+    
+    Args:
+        project_name: 项目名称
+        
+    Returns:
+        包含清理结果的字典：
+        - deleted_files: 是否删除了项目目录
+        - cleared_redis: 清理的 Redis 键数量
+        - cleared_mem0: 是否清理了 Mem0 记忆
+        - deleted_vectors: 是否删除了向量存储目录
+    """
     project_dir = os.path.join(PROJECTS_ROOT, project_name)
+    result = {
+        "deleted_files": False,
+        "cleared_redis": 0,
+        "cleared_mem0": False,
+        "deleted_vectors": False,
+    }
+    
+    # 1. 停止活跃任务并清理 Redis 状态
+    try:
+        from novelgen.services import generation_service
+        # 先尝试停止正在运行的任务
+        generation_service.stop_generation(project_name)
+        # 清理 Redis 运行时状态
+        result["cleared_redis"] = generation_service.clear_runtime_state(project_name)
+        logger.info(f"已清理项目 {project_name} 的 Redis 状态，删除 {result['cleared_redis']} 个键")
+    except Exception as e:
+        logger.warning(f"清理 Redis 状态时出错: {e}")
+    
+    # 2. 尝试加载项目配置以获取向量存储路径和 Mem0 配置
+    vector_store_dir: Optional[str] = None
+    mem0_enabled = False
+    
+    try:
+        settings_path = os.path.join(project_dir, "settings.json")
+        if os.path.exists(settings_path):
+            from novelgen.config import ProjectConfig
+            config = ProjectConfig(
+                project_name=project_name,
+                project_dir=project_dir,
+            )
+            vector_store_dir = config.get_vector_store_dir()
+            mem0_enabled = config.mem0_config is not None and config.mem0_config.enabled
+    except Exception as e:
+        logger.warning(f"加载项目配置时出错: {e}")
+    
+    # 3. 清理 Mem0 记忆（如果启用）
+    if mem0_enabled:
+        try:
+            from novelgen.runtime.mem0_manager import Mem0Manager, Mem0InitializationError
+            from novelgen.config import ProjectConfig
+            
+            config = ProjectConfig(
+                project_name=project_name,
+                project_dir=project_dir,
+            )
+            if config.mem0_config and config.mem0_config.enabled:
+                mem0_manager = Mem0Manager(
+                    config=config.mem0_config,
+                    project_id=project_name,
+                    embedding_config=config.embedding_config,
+                )
+                mem0_manager.clear_project_memory()
+                mem0_manager.close(timeout=3.0)
+                result["cleared_mem0"] = True
+                logger.info(f"已清理项目 {project_name} 的 Mem0 记忆")
+        except Mem0InitializationError as e:
+            logger.warning(f"Mem0 初始化失败，跳过记忆清理: {e}")
+        except Exception as e:
+            logger.warning(f"清理 Mem0 记忆时出错: {e}")
+    
+    # 4. 删除向量存储目录（仅当位于项目目录内时）
+    if vector_store_dir and os.path.exists(vector_store_dir):
+        # 安全检查：只删除位于项目目录内的向量存储
+        abs_vector_dir = os.path.abspath(vector_store_dir)
+        abs_project_dir = os.path.abspath(project_dir)
+        if abs_vector_dir.startswith(abs_project_dir + os.sep):
+            try:
+                shutil.rmtree(vector_store_dir)
+                result["deleted_vectors"] = True
+                logger.info(f"已删除项目 {project_name} 的向量存储目录: {vector_store_dir}")
+            except Exception as e:
+                logger.warning(f"删除向量存储目录时出错: {e}")
+        else:
+            logger.info(f"向量存储目录 {vector_store_dir} 不在项目目录内，跳过删除")
+    
+    # 5. 删除项目目录
     if os.path.exists(project_dir):
-        shutil.rmtree(project_dir)
+        try:
+            shutil.rmtree(project_dir)
+            result["deleted_files"] = True
+            logger.info(f"已删除项目目录: {project_dir}")
+        except Exception as e:
+            logger.error(f"删除项目目录时出错: {e}")
+            raise
+    
+    return result
 
 
 def load_settings(project_name: str) -> Dict[str, Any]:

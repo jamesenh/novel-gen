@@ -152,15 +152,16 @@ def save_json_file(filepath: str, data: dict):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def ensure_settings_file(project_name: str, world_description: str = "") -> str:
+def ensure_settings_file(project_name: str) -> str:
     """确保项目有 settings.json 文件，如果不存在则创建
     
     Args:
         project_name: 项目名称
-        world_description: 世界观描述（可选）
     
     Returns:
         settings.json 文件路径
+        
+    更新: 2025-12-11 - 移除 world_description 参数，由独立 JSON 文件管理
     """
     project_dir = get_project_dir(project_name)
     settings_file = os.path.join(project_dir, "settings.json")
@@ -170,12 +171,10 @@ def ensure_settings_file(project_name: str, world_description: str = "") -> str:
         os.makedirs(project_dir, exist_ok=True)
         os.makedirs(os.path.join(project_dir, "chapters"), exist_ok=True)
         
-        # 创建基本的 settings.json
+        # 创建基本的 settings.json（world/theme 由独立 JSON 文件管理）
         settings_data = {
             "project_name": project_name,
             "author": "Jamesenh",
-            "world_description": world_description,
-            "theme_description": "",
             "initial_chapters": 3,
             "max_chapters": 50
         }
@@ -243,7 +242,6 @@ def init(
     os.makedirs(project_dir, exist_ok=True)
     os.makedirs(os.path.join(project_dir, "chapters"), exist_ok=True)
     
-    world_description = world_input
     selected_world = None
     
     # AI 生成世界观候选
@@ -311,7 +309,6 @@ def init(
                                 variant_id=variant.variant_id,
                                 project_dir=project_dir
                             )
-                            world_description = result.expanded_prompt or world_input
                             rprint(f"\n[green]✅ 已选择: {variant.style_tag} - {selected_world.world_name}[/green]")
                             break
                         else:
@@ -328,7 +325,6 @@ def init(
     rprint("[dim]（描述故事的核心主题，直接回车让 AI 根据世界观自动生成）[/dim]")
     theme_input = Prompt.ask("主题", default="")
     
-    theme_description = theme_input
     selected_theme = None
     
     # AI 生成主题冲突候选
@@ -398,7 +394,6 @@ def init(
                             # 保存选中的主题冲突
                             theme_file = os.path.join(project_dir, "theme_conflict.json")
                             save_json_file(theme_file, selected_theme.model_dump())
-                            theme_description = theme_input or f"由 AI 自动生成: {variant.style_tag}"
                             rprint(f"\n[green]✅ 已选择: {variant.style_tag} - {selected_theme.core_theme}[/green]")
                             break
                         else:
@@ -410,12 +405,10 @@ def init(
                 rprint(f"\n[yellow]⚠️ AI 生成主题冲突失败: {e}[/yellow]")
                 rprint("[dim]后续将自动生成主题冲突[/dim]")
     
-    # 创建 settings.json
+    # 创建 settings.json（world/theme 由独立 JSON 文件管理）
     settings_data = {
         "project_name": project_name,
         "author": "Jamesenh",
-        "world_description": world_description,
-        "theme_description": theme_description,
         "initial_chapters": chapters,
         "max_chapters": max(chapters * 3, 50)
     }
@@ -875,19 +868,14 @@ def world_variants_cmd(
     """
     project_dir = get_project_dir(project_name)
     
-    # 确定世界观提示
+    # 确定世界观提示（必须通过 --prompt 指定）
     if prompt is None:
-        # 从 settings.json 读取
-        settings = load_json_file(os.path.join(project_dir, "settings.json"))
-        if settings and settings.get("world_description"):
-            prompt = settings["world_description"]
-        else:
-            rprint("[red]❌ 未指定世界观提示[/red]")
-            rprint(f"[dim]请使用 --prompt 指定世界观提示[/dim]")
-            raise typer.Exit(1)
+        rprint("[red]❌ 未指定世界观提示[/red]")
+        rprint(f"[dim]请使用 --prompt 指定世界观提示，如：ng world-variants {project_name} --prompt \"修仙世界\"[/dim]")
+        raise typer.Exit(1)
     
     # 确保项目有 settings.json
-    ensure_settings_file(project_name, world_description=prompt)
+    ensure_settings_file(project_name)
     
     rprint(f"\n[bold cyan]🌍 生成世界观候选: {project_name}[/bold cyan]\n")
     rprint(f"[dim]提示: {prompt[:50]}{'...' if len(prompt) > 50 else ''}[/dim]")

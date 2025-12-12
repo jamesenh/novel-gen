@@ -1,13 +1,13 @@
 import clsx from "clsx";
 import { useEffect, useState } from "react";
 import Layout from "../components/Layout";
-import WorldView from "../components/WorldView";
-import CharacterList from "../components/CharacterList";
-import OutlineTree from "../components/OutlineTree";
 import WorldEditor from "../components/WorldEditor";
 import CharacterEditor from "../components/CharacterEditor";
 import OutlineEditor from "../components/OutlineEditor";
 import ChapterEditor from "../components/ChapterEditor";
+import ReaderDrawer from "../components/ReaderDrawer";
+import ReferencePanel from "../components/ReferencePanel";
+import ExportMenu from "../components/ExportMenu";
 import { useParams } from "react-router-dom";
 import { ChapterContent, ChapterMeta, CharactersData, OutlineData, WorldView as WorldViewType } from "../types";
 import {
@@ -23,8 +23,14 @@ import {
   updateWorld,
 } from "../services/api";
 
+/**
+ * 内容阅读页 - 重构版
+ * 布局：桌面三栏（章节列表 | 正文 | 参考面板）+ 移动端抽屉
+ */
 export default function Reader() {
   const { name } = useParams();
+
+  // 数据状态
   const [chapters, setChapters] = useState<ChapterMeta[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
   const [content, setContent] = useState<ChapterContent | null>(null);
@@ -35,11 +41,21 @@ export default function Reader() {
   const [characters, setCharacters] = useState<CharactersData | null>(null);
   const [outline, setOutline] = useState<OutlineData | null>(null);
   const [infoLoading, setInfoLoading] = useState(false);
+
+  // 编辑状态
   const [worldEditing, setWorldEditing] = useState(false);
   const [charsEditing, setCharsEditing] = useState(false);
   const [outlineEditing, setOutlineEditing] = useState(false);
   const [chapterEditing, setChapterEditing] = useState(false);
 
+  // 抽屉状态（移动端）
+  const [chaptersDrawerOpen, setChaptersDrawerOpen] = useState(false);
+  const [referenceDrawerOpen, setReferenceDrawerOpen] = useState(false);
+
+  // 参考面板显示状态（桌面端）
+  const [showReferencePanel, setShowReferencePanel] = useState(true);
+
+  // 加载项目信息
   useEffect(() => {
     if (!name) return;
     setInfoLoading(true);
@@ -53,6 +69,7 @@ export default function Reader() {
       .finally(() => setInfoLoading(false));
   }, [name]);
 
+  // 加载章节列表
   useEffect(() => {
     if (!name) return;
     setLoadingList(true);
@@ -67,6 +84,7 @@ export default function Reader() {
       .finally(() => setLoadingList(false));
   }, [name]);
 
+  // 加载章节内容
   useEffect(() => {
     if (!name || selected === null) return;
     setLoadingContent(true);
@@ -80,6 +98,7 @@ export default function Reader() {
       .finally(() => setLoadingContent(false));
   }, [name, selected]);
 
+  // 保存处理函数
   const handleSaveWorld = async (payload: WorldViewType) => {
     if (!name) return;
     await updateWorld(name, payload);
@@ -118,8 +137,8 @@ export default function Reader() {
               scenes_count: draft.scenes.length,
               total_words: draft.scenes.reduce((acc, s) => acc + (s.word_count ?? s.content.length), 0),
             }
-          : ch,
-      ),
+          : ch
+      )
     );
   };
 
@@ -139,152 +158,353 @@ export default function Reader() {
     if (target) {
       target.scrollIntoView({ behavior: "smooth", block: "start" });
     }
+    // 移动端跳转后关闭抽屉
+    setReferenceDrawerOpen(false);
+  };
+
+  const selectChapter = (chapterNumber: number) => {
+    setSelected(chapterNumber);
+    // 移动端选择后关闭抽屉
+    setChaptersDrawerOpen(false);
   };
 
   return (
     <Layout>
-      <section className="glass-panel space-y-3 p-6">
-        <h1 className="page-title">内容阅读</h1>
-        <p className="muted">浏览项目 {name} 的章节内容，查看世界观、角色与大纲。</p>
-        {name && (
-          <div className="flex flex-wrap gap-2 text-xs">
-            <a className="btn-ghost px-3" href={`/api/projects/${name}/export/txt`} target="_blank" rel="noreferrer">
-              导出全书 TXT
-            </a>
-            <a className="btn-ghost px-3" href={`/api/projects/${name}/export/md`} target="_blank" rel="noreferrer">
-              导出全书 MD
-            </a>
-            <a className="btn-ghost px-3" href={`/api/projects/${name}/export/json`} target="_blank" rel="noreferrer">
-              导出全书 JSON
-            </a>
-            {selected && (
-              <>
-                <a className="btn-ghost px-3" href={`/api/projects/${name}/export/txt/${selected}`} target="_blank" rel="noreferrer">
-                  导出当前章 TXT
-                </a>
-                <a className="btn-ghost px-3" href={`/api/projects/${name}/export/md/${selected}`} target="_blank" rel="noreferrer">
-                  导出当前章 MD
-                </a>
-                <a className="btn-ghost px-3" href={`/api/projects/${name}/export/json/${selected}`} target="_blank" rel="noreferrer">
-                  导出当前章 JSON
-                </a>
-              </>
+      {/* ===== 移动端抽屉 ===== */}
+      <ReaderDrawer
+        open={chaptersDrawerOpen}
+        onClose={() => setChaptersDrawerOpen(false)}
+        side="left"
+        title="章节列表"
+      >
+        <ChaptersList
+          chapters={chapters}
+          selected={selected}
+          loading={loadingList}
+          onSelect={selectChapter}
+        />
+      </ReaderDrawer>
+
+      <ReaderDrawer
+        open={referenceDrawerOpen}
+        onClose={() => setReferenceDrawerOpen(false)}
+        side="right"
+        title="参考信息"
+      >
+        <ReferencePanel
+          world={world}
+          characters={characters}
+          outline={outline}
+          scenes={content?.scenes}
+          loading={infoLoading}
+          onJumpToScene={jumpToScene}
+          onEditWorld={() => {
+            setWorldEditing(true);
+            setReferenceDrawerOpen(false);
+          }}
+          onEditCharacters={() => {
+            setCharsEditing(true);
+            setReferenceDrawerOpen(false);
+          }}
+          onEditOutline={() => {
+            setOutlineEditing(true);
+            setReferenceDrawerOpen(false);
+          }}
+        />
+      </ReaderDrawer>
+
+      {/* ===== Sticky 工具栏 ===== */}
+      <div className="sticky top-0 z-30 -mx-4 mb-4 border-b border-slate-200 bg-white/95 px-4 py-3 backdrop-blur-sm lg:-mx-0 lg:rounded-xl lg:border lg:shadow-sm">
+        <div className="flex items-center justify-between gap-3">
+          {/* 左侧：标题 + 移动端章节按钮 */}
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => setChaptersDrawerOpen(true)}
+              className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 xl:hidden"
+            >
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h7" />
+              </svg>
+              <span className="hidden sm:inline">章节</span>
+            </button>
+            <div>
+              <h1 className="text-base font-bold text-slate-900 sm:text-lg">内容阅读</h1>
+              <p className="hidden text-xs text-slate-500 sm:block">项目：{name}</p>
+            </div>
+          </div>
+
+          {/* 右侧：工具按钮 */}
+          <div className="flex items-center gap-2">
+            {name && <ExportMenu projectName={name} selectedChapter={selected} />}
+
+            {/* 桌面端参考面板开关 */}
+            <button
+              onClick={() => setShowReferencePanel(!showReferencePanel)}
+              className={clsx(
+                "hidden items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition xl:flex",
+                showReferencePanel
+                  ? "border-blue-300 bg-blue-50 text-blue-700"
+                  : "border-slate-200 bg-white text-slate-700 hover:border-slate-300"
+              )}
+            >
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+              </svg>
+              参考
+            </button>
+
+            {/* 移动端参考面板按钮 */}
+            <button
+              onClick={() => setReferenceDrawerOpen(true)}
+              className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 xl:hidden"
+            >
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <span className="hidden sm:inline">参考</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {error && <div className="mb-4 rounded-lg bg-red-50 p-3 text-sm text-red-600">{error}</div>}
+
+      {/* ===== 主体三栏布局 ===== */}
+      <div className="flex gap-4">
+        {/* 左栏：章节列表（桌面端） */}
+        <aside className="hidden w-56 shrink-0 xl:block">
+          <div className="sticky top-20 max-h-[calc(100vh-6rem)] overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+            <div className="border-b border-slate-100 px-4 py-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-slate-900">章节</h3>
+                <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600">
+                  共 {chapters.length}
+                </span>
+              </div>
+            </div>
+            <div className="max-h-[calc(100vh-10rem)] overflow-y-auto">
+              <ChaptersList
+                chapters={chapters}
+                selected={selected}
+                loading={loadingList}
+                onSelect={setSelected}
+              />
+            </div>
+          </div>
+        </aside>
+
+        {/* 中栏：正文阅读区 */}
+        <main className="min-w-0 flex-1">
+          <div className="rounded-xl border border-slate-200 bg-white shadow-sm">
+            {!content && !loadingContent && (
+              <div className="flex h-64 items-center justify-center text-sm text-slate-400">
+                请选择章节开始阅读
+              </div>
+            )}
+            {loadingContent && (
+              <div className="flex h-64 items-center justify-center text-sm text-slate-500">
+                加载章节内容...
+              </div>
+            )}
+            {content && (
+              <div className="p-5 sm:p-6">
+                {/* 章节头部 */}
+                <div className="mb-6 border-b border-slate-100 pb-4">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <h2 className="text-xl font-bold text-slate-900">
+                      第{content.chapter_number}章 {content.chapter_title}
+                    </h2>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        className={clsx(
+                          "rounded-lg px-3 py-1.5 text-xs font-medium transition",
+                          chapterEditing
+                            ? "bg-slate-200 text-slate-700"
+                            : "bg-blue-50 text-blue-700 hover:bg-blue-100"
+                        )}
+                        onClick={() => setChapterEditing((v) => !v)}
+                      >
+                        {chapterEditing ? "取消编辑" : "编辑章节"}
+                      </button>
+                      <button
+                        className="rounded-lg bg-red-50 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-100"
+                        onClick={() => handleDeleteChapter(content.chapter_number)}
+                      >
+                        删除
+                      </button>
+                    </div>
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-2 text-xs text-slate-500">
+                    <span>{content.scenes.length} 个场景</span>
+                    <span>·</span>
+                    <span>{content.scenes.reduce((acc, s) => acc + (s.word_count ?? s.content.length), 0)} 字</span>
+                  </div>
+                </div>
+
+                {/* 章节内容 */}
+                {!chapterEditing && (
+                  <article className="prose prose-slate max-w-none">
+                    {content.scenes.map((scene) => (
+                      <section
+                        key={scene.scene_number}
+                        id={`scene-${scene.scene_number}`}
+                        className="mb-8 scroll-mt-24"
+                      >
+                        <div className="mb-3 flex items-center gap-2">
+                          <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-semibold text-slate-600">
+                            场景 {scene.scene_number}
+                          </span>
+                          <span className="text-[10px] text-slate-400">
+                            {scene.word_count || scene.content.length} 字
+                          </span>
+                        </div>
+                        <div className="whitespace-pre-wrap text-base leading-8 text-slate-700">
+                          {scene.content}
+                        </div>
+                      </section>
+                    ))}
+                  </article>
+                )}
+
+                {/* 章节编辑器 */}
+                {chapterEditing && (
+                  <ChapterEditor data={content} onSave={handleSaveChapter} onCancel={() => setChapterEditing(false)} />
+                )}
+              </div>
             )}
           </div>
-        )}
-      </section>
+        </main>
 
-      {error && <div className="text-red-500">{error}</div>}
-
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <div className="space-y-3">
-          <div className="flex items-center justify-between text-sm">
-            <span className="font-semibold text-slate-800">世界观</span>
-            <button className="btn-ghost px-2 text-blue-600" onClick={() => setWorldEditing((v) => !v)}>
-              {worldEditing ? "取消" : "编辑"}
-            </button>
-          </div>
-          {worldEditing ? (
-            <WorldEditor data={world} loading={infoLoading} onSave={handleSaveWorld} onCancel={() => setWorldEditing(false)} />
-          ) : (
-            <WorldView data={world} loading={infoLoading} />
-          )}
-        </div>
-        <div className="space-y-3">
-          <div className="flex items-center justify-between text-sm">
-            <span className="font-semibold text-slate-800">角色</span>
-            <button className="btn-ghost px-2 text-blue-600" onClick={() => setCharsEditing((v) => !v)}>
-              {charsEditing ? "取消" : "编辑"}
-            </button>
-          </div>
-          {charsEditing ? (
-            <CharacterEditor data={characters} loading={infoLoading} onSave={handleSaveCharacters} onCancel={() => setCharsEditing(false)} />
-          ) : (
-            <CharacterList data={characters} loading={infoLoading} />
-          )}
-        </div>
-        <div className="space-y-3">
-          <div className="flex items-center justify-between text-sm">
-            <span className="font-semibold text-slate-800">大纲</span>
-            <button className="btn-ghost px-2 text-blue-600" onClick={() => setOutlineEditing((v) => !v)}>
-              {outlineEditing ? "取消" : "编辑"}
-            </button>
-          </div>
-          {outlineEditing ? (
-            <OutlineEditor data={outline} loading={infoLoading} onSave={handleSaveOutline} onCancel={() => setOutlineEditing(false)} />
-          ) : (
-            <OutlineTree data={outline} loading={infoLoading} />
-          )}
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-4">
-        <div className="glass-panel p-4 lg:col-span-1">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-slate-900">章节</h3>
-            <span className="pill text-xs">共 {chapters.length}</span>
-          </div>
-          {loadingList && <div className="mt-2 text-xs text-slate-500">加载章节...</div>}
-          <div className="mt-3 space-y-2 text-sm">
-            {chapters.map((ch) => (
-              <button
-                key={ch.chapter_number}
-                onClick={() => setSelected(ch.chapter_number)}
-                className={clsx(
-                  "w-full rounded-xl px-3 py-2 text-left transition",
-                  selected === ch.chapter_number ? "bg-blue-50 text-blue-700 shadow-sm" : "hover:bg-slate-50",
-                )}
-              >
-                第{ch.chapter_number}章 {ch.chapter_title}
-              </button>
-            ))}
-            {chapters.length === 0 && <div className="muted">暂无章节</div>}
-          </div>
-        </div>
-        <div className="glass-panel p-5 lg:col-span-3">
-          {!content && !loadingContent && <div className="muted">请选择章节</div>}
-          {loadingContent && <div className="muted">加载章节内容...</div>}
-          {content && (
-            <div className="space-y-4">
-              <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-                <h2 className="text-lg font-semibold text-slate-900">
-                  第{content.chapter_number}章 {content.chapter_title}
-                </h2>
-                <div className="flex flex-wrap gap-2 text-xs text-slate-600">
-                  <button className="btn-soft px-3 py-1" onClick={() => setChapterEditing((v) => !v)}>
-                    {chapterEditing ? "取消编辑" : "编辑章节"}
-                  </button>
-                  <button className="btn-ghost px-3 py-1 text-red-600" onClick={() => handleDeleteChapter(content.chapter_number)}>
-                    删除章节
-                  </button>
-                  {content.scenes.length > 0 &&
-                    content.scenes.map((scene) => (
-                      <button
-                        key={scene.scene_number}
-                        onClick={() => jumpToScene(scene.scene_number)}
-                        className="btn-ghost px-3 py-1"
-                      >
-                        场景 {scene.scene_number}
-                      </button>
-                    ))}
-                </div>
-              </div>
-              {!chapterEditing && (
-                <div className="space-y-6 text-sm leading-7 text-slate-800">
-                  {content.scenes.map((scene) => (
-                    <div key={scene.scene_number} id={`scene-${scene.scene_number}`} className="space-y-2">
-                      <div className="text-xs font-semibold text-slate-500">场景 {scene.scene_number}</div>
-                      <div>{scene.content}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {chapterEditing && <ChapterEditor data={content} onSave={handleSaveChapter} onCancel={() => setChapterEditing(false)} />}
+        {/* 右栏：参考面板（桌面端） */}
+        {showReferencePanel && (
+          <aside className="hidden w-72 shrink-0 xl:block">
+            <div className="sticky top-20 max-h-[calc(100vh-6rem)] overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+              <ReferencePanel
+                world={world}
+                characters={characters}
+                outline={outline}
+                scenes={content?.scenes}
+                loading={infoLoading}
+                onJumpToScene={jumpToScene}
+                onEditWorld={() => setWorldEditing(true)}
+                onEditCharacters={() => setCharsEditing(true)}
+                onEditOutline={() => setOutlineEditing(true)}
+              />
             </div>
-          )}
-        </div>
+          </aside>
+        )}
       </div>
+
+      {/* ===== 编辑弹窗 ===== */}
+      {worldEditing && (
+        <EditorModal title="编辑世界观" onClose={() => setWorldEditing(false)}>
+          <WorldEditor data={world} loading={infoLoading} onSave={handleSaveWorld} onCancel={() => setWorldEditing(false)} />
+        </EditorModal>
+      )}
+      {charsEditing && (
+        <EditorModal title="编辑角色" onClose={() => setCharsEditing(false)}>
+          <CharacterEditor data={characters} loading={infoLoading} onSave={handleSaveCharacters} onCancel={() => setCharsEditing(false)} />
+        </EditorModal>
+      )}
+      {outlineEditing && (
+        <EditorModal title="编辑大纲" onClose={() => setOutlineEditing(false)}>
+          <OutlineEditor data={outline} loading={infoLoading} onSave={handleSaveOutline} onCancel={() => setOutlineEditing(false)} />
+        </EditorModal>
+      )}
     </Layout>
   );
 }
 
+/* ============ 子组件 ============ */
+
+/** 章节列表 */
+function ChaptersList({
+  chapters,
+  selected,
+  loading,
+  onSelect,
+}: {
+  chapters: ChapterMeta[];
+  selected: number | null;
+  loading: boolean;
+  onSelect: (chapterNumber: number) => void;
+}) {
+  if (loading) {
+    return <div className="p-4 text-xs text-slate-500">加载章节...</div>;
+  }
+
+  if (chapters.length === 0) {
+    return <div className="p-4 text-xs text-slate-400">暂无章节</div>;
+  }
+
+  return (
+    <div className="p-2">
+      {chapters.map((ch) => (
+        <button
+          key={ch.chapter_number}
+          onClick={() => onSelect(ch.chapter_number)}
+          className={clsx(
+            "w-full rounded-lg px-3 py-2.5 text-left text-sm transition",
+            selected === ch.chapter_number
+              ? "bg-blue-50 text-blue-700 shadow-sm"
+              : "text-slate-700 hover:bg-slate-50"
+          )}
+        >
+          <div className="font-medium">
+            第{ch.chapter_number}章
+          </div>
+          <div className={clsx(
+            "mt-0.5 truncate text-xs",
+            selected === ch.chapter_number ? "text-blue-600" : "text-slate-500"
+          )}>
+            {ch.chapter_title}
+          </div>
+          <div className="mt-1 flex gap-2 text-[10px] text-slate-400">
+            <span>{ch.scenes_count} 场景</span>
+            <span>{ch.total_words} 字</span>
+          </div>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** 编辑器弹窗 */
+function EditorModal({
+  title,
+  onClose,
+  children,
+}: {
+  title: string;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  // 禁止 body 滚动
+  useEffect(() => {
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = "";
+    };
+  }, []);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-sm">
+      <div className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+        {/* 头部 */}
+        <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
+          <h3 className="text-lg font-bold text-slate-900">{title}</h3>
+          <button
+            onClick={onClose}
+            className="flex h-8 w-8 items-center justify-center rounded-full text-slate-500 hover:bg-slate-100"
+          >
+            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+        {/* 内容 */}
+        <div className="flex-1 overflow-y-auto p-6">{children}</div>
+      </div>
+    </div>
+  );
+}

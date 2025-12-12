@@ -67,14 +67,33 @@ async def get_project_detail(name: str):
     return ProjectDetailResponse(summary=summary, settings=settings, state=state)
 
 
-@router.delete("/{name}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{name}")
 async def delete_project_api(name: str):
-    """删除项目"""
+    """
+    删除项目及其所有关联数据
+    
+    包括：
+    - 项目目录和所有文件
+    - Redis 运行时状态（进度、日志、活跃任务）
+    - Mem0 记忆（如果启用）
+    - 向量存储目录（如果位于项目目录内）
+    """
     project_dir = os.path.join(project_service.PROJECTS_ROOT, name)
     if not os.path.exists(project_dir):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="项目不存在")
-    project_service.delete_project(name)
-    return
+    
+    try:
+        result = project_service.delete_project(name)
+        return {
+            "deleted": True,
+            "project_name": name,
+            "details": result,
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"删除项目失败: {str(e)}"
+        )
 
 
 @router.get("/{name}/state", response_model=ProjectState)

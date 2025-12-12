@@ -14,15 +14,12 @@ class Settings(BaseModel):
     
     更新: 2025-11-25 - 移除 persistence_enabled 和 vector_store_enabled，统一使用 Mem0
     更新: 2025-11-28 - 支持动态章节数量，num_chapters 改为 initial_chapters + max_chapters
+    更新: 2025-12-11 - 移除 world_description/theme_description，改由独立 JSON 文件管理
     """
     project_name: str = Field(description="项目名称")
     author: str = Field(default="Jamesenh", description="作者")
     llm_model: str = Field(default="gpt-4", description="使用的LLM模型")
     temperature: float = Field(default=0.7, description="生成温度")
-    
-    # 用户输入字段（用于工作流）
-    world_description: str = Field(description="世界观描述")
-    theme_description: Optional[str] = Field(default="", description="主题描述（可选）")
     
     # 动态章节数量配置
     initial_chapters: int = Field(default=2, description="初始规划章节数（开篇阶段）")
@@ -30,6 +27,10 @@ class Settings(BaseModel):
     
     # 向后兼容：保留 num_chapters 字段，加载旧配置时会自动迁移
     num_chapters: Optional[int] = Field(default=None, description="[已废弃] 请使用 initial_chapters 和 max_chapters")
+    
+    # [已废弃] 旧字段仅用于加载兼容，不再使用
+    world_description: Optional[str] = Field(default=None, exclude=True, description="[已废弃] 世界观由 world.json 管理")
+    theme_description: Optional[str] = Field(default=None, exclude=True, description="[已废弃] 主题由 theme_conflict.json 管理")
     
     @model_validator(mode='after')
     def validate_chapter_settings(self) -> 'Settings':
@@ -134,6 +135,7 @@ class Character(BaseModel):
     motivation: str = Field(description="行动动机")
     abilities: Optional[List[str]] = Field(default=None, description="特殊能力")
     relationships: Optional[Dict[str, str]] = Field(default=None, description="与其他角色的关系")
+    relationships_brief: Optional[Dict[str, str]] = Field(default=None, description="与其他角色的简短关系标签（≤12字），用于可视化展示")
 
 
 class CharactersConfig(BaseModel):

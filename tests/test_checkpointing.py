@@ -28,7 +28,6 @@ def test_checkpoint_creation():
             settings=Settings(
                 project_name='test_checkpoint',
                 author='Test Author',
-                world_description='测试世界描述'
             )
         )
         
@@ -80,7 +79,6 @@ def test_workflow_resume_from_checkpoint():
             settings=Settings(
                 project_name='test_resume',
                 author='Test Author',
-                world_description='测试世界描述'
             )
         )
         
@@ -137,7 +135,6 @@ def test_checkpoint_state_preservation():
             settings=Settings(
                 project_name='test_preserve',
                 author='Test Author',
-                world_description='测试世界描述'
             ),
             world=WorldSetting(
                 world_name='保存测试世界',
@@ -194,13 +191,13 @@ def test_multiple_checkpoint_threads():
         state1 = NovelGenerationState(
             project_name='project1',
             project_dir=os.path.join(test_dir, 'project1'),
-            settings=Settings(project_name='project1', author='Author 1', world_description='测试世界1')
+            settings=Settings(project_name='project1', author='Author 1')
         )
         
         state2 = NovelGenerationState(
             project_name='project2',
             project_dir=os.path.join(test_dir, 'project2'),
-            settings=Settings(project_name='project2', author='Author 2', world_description='测试世界2')
+            settings=Settings(project_name='project2', author='Author 2')
         )
         
         # 为两个项目创建独立的检查点线程
@@ -244,7 +241,7 @@ def test_checkpoint_time_travel():
         state = NovelGenerationState(
             project_name='test_timetravel',
             project_dir=test_dir,
-            settings=Settings(project_name='test_timetravel', author='Test', world_description='测试世界描述')
+            settings=Settings(project_name='test_timetravel', author='Test')
         )
         
         config = {"configurable": {"thread_id": "test_timetravel"}}

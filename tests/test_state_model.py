@@ -34,7 +34,6 @@ def test_state_initialization_with_data():
     settings = Settings(
         project_name='test_project',
         author='Test Author',
-        world_description='测试世界描述'
     )
     
     world = WorldSetting(

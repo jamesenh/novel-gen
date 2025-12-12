@@ -31,12 +31,10 @@ def test_chapter_loop_workflow():
     try:
         print(f"📁 测试项目目录: {project_dir}")
         
-        # 创建测试配置
+        # 创建测试配置（world/theme 由独立 JSON 文件管理）
         settings = Settings(
             project_name=project_name,
             author="Jamesenh",
-            world_description="一个赛博朋克风格的未来城市，科技高度发达但贫富差距极大",
-            theme_description="探讨人工智能觉醒与人性的边界",
             num_chapters=2  # 只生成2章用于测试
         )
         

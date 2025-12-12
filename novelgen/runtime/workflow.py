@@ -207,14 +207,14 @@ def create_novel_generation_workflow(checkpointer=None, project_dir: Optional[st
     # 输出：更新 state.settings, state.project_dir
     workflow.add_node("load_settings", load_settings_node)
     
-    # 世界观生成节点：根据用户描述生成完整的世界观设定
-    # 输入：state.settings.world_description
-    # 输出：state.world (WorldSetting 对象)，保存到 world.json
+    # 世界观加载节点：从 world.json 加载世界观设定（需先通过内容生成接口创建）
+    # 输入：project_dir/world.json
+    # 输出：state.world (WorldSetting 对象)
     workflow.add_node("world_creation", world_creation_node)
     
-    # 主题冲突生成节点：生成故事的核心主题和冲突设定
-    # 输入：state.settings.theme_description, state.world
-    # 输出：state.theme_conflict (ThemeConflict 对象)，保存到 theme_conflict.json
+    # 主题冲突加载节点：从 theme_conflict.json 加载主题设定（需先通过内容生成接口创建）
+    # 输入：project_dir/theme_conflict.json, state.world
+    # 输出：state.theme_conflict (ThemeConflict 对象)
     workflow.add_node("theme_conflict_creation", theme_conflict_creation_node)
     
     # 角色生成节点：生成主角、配角、反派等角色设定

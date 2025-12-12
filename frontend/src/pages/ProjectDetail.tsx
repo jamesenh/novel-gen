@@ -1,12 +1,14 @@
 import clsx from "clsx";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import Layout from "../components/Layout";
 import RollbackModal from "../components/RollbackModal";
+import DeleteProjectModal from "../components/DeleteProjectModal";
+import ContentEditorModal from "../components/ContentEditorModal";
 import ProgressBar from "../components/ProgressBar";
 import { fetchProgress, getProjectDetail } from "../services/api";
 import { formatDateTime } from "../utils/date";
-import { ProgressSnapshot, ProjectDetail as ProjectDetailType } from "../types";
+import { ContentTarget, ProgressSnapshot, ProjectDetail as ProjectDetailType } from "../types";
 
 export default function ProjectDetail() {
   const { name } = useParams();
@@ -16,6 +18,11 @@ export default function ProjectDetail() {
   const [progress, setProgress] = useState<ProgressSnapshot | null>(null);
   const [progressLoading, setProgressLoading] = useState(false);
   const [rollbackOpen, setRollbackOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  
+  // 内容编辑弹窗状态
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editorTarget, setEditorTarget] = useState<ContentTarget>("world");
 
   const stepOrder = useMemo(
     () => [
@@ -28,6 +35,81 @@ export default function ProjectDetail() {
     ],
     [],
   );
+
+  // 可编辑的内容目标
+  const EDITABLE_TARGETS: ContentTarget[] = ["world", "theme", "characters", "outline"];
+  
+  // 待完善配置：仅检查实际生成的 JSON 文件状态
+  const pendingConfigs = useMemo(() => {
+    if (!detail) return [];
+    const { steps } = detail.state;
+    const items: { key: string; label: string; hint: string; editable?: ContentTarget }[] = [];
+
+    if (!steps.world) {
+      items.push({
+        key: "world",
+        label: "世界观（world.json）",
+        hint: "点击「编辑/生成」创建世界观设定",
+        editable: "world",
+      });
+    }
+    if (!steps.theme) {
+      items.push({
+        key: "theme",
+        label: "主题冲突（theme_conflict.json）",
+        hint: "需先完成世界观，点击「编辑/生成」创建主题与冲突",
+        editable: "theme",
+      });
+    }
+    if (!steps.characters) {
+      items.push({
+        key: "characters",
+        label: "角色（characters.json）",
+        hint: "需先完成世界观和主题，点击「编辑/生成」创建角色",
+        editable: "characters",
+      });
+    }
+    if (!steps.outline) {
+      items.push({
+        key: "outline",
+        label: "大纲（outline.json）",
+        hint: "需先完成角色设定，点击「编辑/生成」创建故事大纲",
+        editable: "outline",
+      });
+    }
+    if (!steps.chapters_plan) {
+      items.push({
+        key: "chapters_plan",
+        label: "章节计划（*_plan.json）",
+        hint: "需先完成大纲，启动生成流程后自动创建",
+      });
+    }
+    if (!steps.chapters) {
+      items.push({
+        key: "chapters",
+        label: "章节正文（chapter_*.json）",
+        hint: "需先完成章节计划，启动生成流程后自动创建",
+      });
+    }
+    return items;
+  }, [detail]);
+  
+  // 打开编辑弹窗
+  const openEditor = (target: ContentTarget) => {
+    setEditorTarget(target);
+    setEditorOpen(true);
+  };
+  
+  // 刷新项目详情
+  const refreshDetail = useCallback(() => {
+    if (!name) return;
+    getProjectDetail(name)
+      .then((data) => {
+        setDetail(data);
+        setError(null);
+      })
+      .catch((e) => setError(e?.response?.data?.detail || "加载失败"));
+  }, [name]);
 
   useEffect(() => {
     if (!name) return;
@@ -53,6 +135,14 @@ export default function ProjectDetail() {
   return (
     <Layout>
       <RollbackModal open={rollbackOpen} onClose={() => setRollbackOpen(false)} project={name || ""} />
+      <DeleteProjectModal open={deleteOpen} onClose={() => setDeleteOpen(false)} project={name || ""} />
+      <ContentEditorModal
+        open={editorOpen}
+        project={name || ""}
+        target={editorTarget}
+        onClose={() => setEditorOpen(false)}
+        onSaved={refreshDetail}
+      />
       <section className="space-y-6">
         <div className="glass-panel p-6">
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
@@ -77,8 +167,11 @@ export default function ProjectDetail() {
               <Link className="btn-soft px-4 py-2" to={`/projects/${name}/read`}>
                 内容阅读
               </Link>
-              <button className="btn-ghost px-4 py-2 text-red-600" onClick={() => setRollbackOpen(true)}>
+              <button className="btn-ghost px-4 py-2 text-amber-600" onClick={() => setRollbackOpen(true)}>
                 回滚
+              </button>
+              <button className="btn-ghost px-4 py-2 text-red-600" onClick={() => setDeleteOpen(true)}>
+                删除
               </button>
             </div>
           </div>
@@ -149,12 +242,53 @@ export default function ProjectDetail() {
               </div>
             </div>
 
+          <div className="glass-panel p-5">
+            <div className="flex items-center justify-between">
+              <h2 className="section-title">待完善配置</h2>
+              <span className={clsx("pill", pendingConfigs.length === 0 ? "pill-info" : "pill-warning")}>
+                {pendingConfigs.length === 0 ? "已就绪" : `待完成 ${pendingConfigs.length} 项`}
+              </span>
+            </div>
+            {pendingConfigs.length === 0 ? (
+              <div className="mt-2 text-sm text-slate-600">基础配置已准备好，可以直接启动生成。</div>
+            ) : (
+              <div className="mt-3 space-y-2">
+                {pendingConfigs.map((item) => (
+                  <div
+                    key={item.key}
+                    className="flex items-start justify-between rounded-xl border border-amber-100 bg-amber-50/70 px-3 py-2 text-amber-800"
+                  >
+                    <div>
+                      <div className="font-medium">{item.label}</div>
+                      <div className="text-xs text-amber-700">{item.hint}</div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {item.editable && (
+                        <button
+                          className="rounded-lg bg-amber-100 px-3 py-1 text-xs font-medium text-amber-800 hover:bg-amber-200"
+                          onClick={() => openEditor(item.editable!)}
+                        >
+                          编辑/生成
+                        </button>
+                      )}
+                      <span className="pill pill-warning">待完善</span>
+                    </div>
+                  </div>
+                ))}
+                <div className="text-xs text-slate-500">
+                  点击「编辑/生成」可直接创建内容，或在生成控制页运行对应步骤。
+                </div>
+              </div>
+            )}
+          </div>
+
             <div className="glass-panel p-5">
               <h2 className="section-title">生成进度时间线</h2>
               <div className="mt-4 space-y-3 text-sm">
                 {stepOrder.map(([key, label]) => {
                   const done = detail.state.steps[key as keyof typeof detail.state.steps];
                   const isCurrent = progress?.current_step === key;
+                  const isEditable = EDITABLE_TARGETS.includes(key as ContentTarget);
                   return (
                     <div
                       key={key}
@@ -182,8 +316,18 @@ export default function ProjectDetail() {
                         </span>
                         <span className="font-medium">{label}</span>
                       </div>
-                      {isCurrent && <span className="text-xs text-blue-600">进行中</span>}
-                      {done && <span className="text-xs text-emerald-600">已完成</span>}
+                      <div className="flex items-center gap-2">
+                        {done && isEditable && (
+                          <button
+                            className="rounded-lg bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 hover:bg-emerald-200"
+                            onClick={() => openEditor(key as ContentTarget)}
+                          >
+                            编辑
+                          </button>
+                        )}
+                        {isCurrent && <span className="text-xs text-blue-600">进行中</span>}
+                        {done && <span className="text-xs text-emerald-600">已完成</span>}
+                      </div>
                     </div>
                   );
                 })}

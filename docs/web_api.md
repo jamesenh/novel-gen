@@ -22,6 +22,7 @@
 
 ## 内容读取
 - `GET /api/projects/{name}/world`
+- `GET /api/projects/{name}/theme_conflict`
 - `GET /api/projects/{name}/characters`
 - `GET /api/projects/{name}/outline`
 - `GET /api/projects/{name}/chapters`
@@ -29,11 +30,19 @@
 
 ## 内容编辑
 - `PUT /api/projects/{name}/world` 任意键值
+- `PUT /api/projects/{name}/theme_conflict` 任意键值
 - `PUT /api/projects/{name}/characters` 任意键值（含 protagonist/antagonist/supporting_characters）
 - `PUT /api/projects/{name}/outline` 任意键值
 - `PUT /api/projects/{name}/chapters/{num}` `{chapter_title?, scenes:[{scene_number, content, word_count?}]}` 自动重算字数
 - `DELETE /api/projects/{name}/chapters/{num}` 删除整章
 - `DELETE /api/projects/{name}/chapters/{num}?scene=X` 删除单场景
+
+## 内容生成（LLM 多候选）
+- `POST /api/projects/{name}/content/generate`
+  - 请求：`{target: "world"|"theme"|"characters"|"outline", user_prompt?, num_variants?, num_characters?, expand?}`
+  - 返回：`{target, variants: [{variant_id, style_tag, brief_description, payload}], generated_at}`
+  - world/theme 使用 `num_variants`（默认 3），characters 使用 `num_characters`（默认由环境变量 `CHARACTERS_DEFAULT_COUNT` 控制，未设置时为 5，范围 3-12），outline 当前返回单候选
+  - theme 需先有 world.json，characters 需 world+theme，outline 需 world+theme+characters
 
 ## 回滚
 - `POST /api/projects/{name}/rollback`

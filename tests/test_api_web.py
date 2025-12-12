@@ -27,14 +27,12 @@ def sample_project(tmp_path, monkeypatch):
     chapters_dir = project_dir / "chapters"
     chapters_dir.mkdir(parents=True)
 
-    # settings
+    # settings (不再包含 world_description/theme_description，由独立 JSON 文件管理)
     _write_json(
         project_dir / "settings.json",
         {
             "project_name": "demo",
             "author": "Jamesenh",
-            "world_description": "一个修仙世界",
-            "theme_description": "成长与冲突",
             "initial_chapters": 1,
             "max_chapters": 10,
         },
@@ -153,8 +151,6 @@ def test_project_list_and_detail(client):
 def test_project_creation(client):
     payload = {
         "project_name": "new_proj",
-        "world_description": "test",
-        "theme_description": "",
         "initial_chapters": 2,
     }
     resp = client.post("/api/projects", json=payload)
@@ -374,5 +370,128 @@ def test_delete_chapter(client):
     chapters = client.get("/api/projects/demo/chapters").json()
     nums = [c["chapter_number"] for c in chapters]
     assert 2 not in nums
+
+
+def test_delete_project_success(client, monkeypatch):
+    """测试成功删除项目"""
+    # 模拟 generation_service 的清理函数
+    calls = {}
+
+    def fake_stop(project_name):
+        calls["stop"] = project_name
+        return None
+
+    def fake_clear(project_name):
+        calls["clear"] = project_name
+        return 3
+
+    monkeypatch.setattr(generation_service, "stop_generation", fake_stop)
+    monkeypatch.setattr(generation_service, "clear_runtime_state", fake_clear)
+
+    # 确保项目存在
+    project_root = project_service.PROJECTS_ROOT
+    assert os.path.exists(os.path.join(project_root, "demo"))
+
+    # 删除项目
+    resp = client.delete("/api/projects/demo")
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["deleted"] is True
+    assert payload["project_name"] == "demo"
+    assert payload["details"]["deleted_files"] is True
+    assert payload["details"]["cleared_redis"] == 3
+
+    # 确认项目目录已删除
+    assert not os.path.exists(os.path.join(project_root, "demo"))
+
+    # 确认清理函数被调用
+    assert calls["stop"] == "demo"
+    assert calls["clear"] == "demo"
+
+
+def test_delete_project_not_found(client):
+    """测试删除不存在的项目返回 404"""
+    resp = client.delete("/api/projects/nonexistent_project")
+    assert resp.status_code == 404
+    assert "不存在" in resp.json()["detail"]
+
+
+def test_delete_project_with_mem0_cleanup(tmp_path, monkeypatch):
+    """测试删除项目时 Mem0 清理分支"""
+    # 设置临时项目根目录
+    monkeypatch.setattr(project_service, "PROJECTS_ROOT", str(tmp_path))
+    monkeypatch.setattr(export_service, "PROJECTS_ROOT", str(tmp_path))
+
+    # 创建项目
+    project_dir = tmp_path / "mem0_test"
+    project_dir.mkdir()
+    _write_json(
+        project_dir / "settings.json",
+        {
+            "project_name": "mem0_test",
+            "author": "Jamesenh",
+            "initial_chapters": 1,
+            "max_chapters": 10,
+        },
+    )
+
+    # 模拟 generation_service
+    monkeypatch.setattr(generation_service, "stop_generation", lambda *a: None)
+    monkeypatch.setattr(generation_service, "clear_runtime_state", lambda *a: 0)
+
+    # 模拟 Mem0Manager（不实际初始化）
+    mem0_calls = {}
+
+    class MockMem0Manager:
+        def __init__(self, **kwargs):
+            mem0_calls["init"] = kwargs
+
+        def clear_project_memory(self):
+            mem0_calls["clear"] = True
+            return True
+
+        def close(self, timeout=5.0):
+            mem0_calls["close"] = True
+
+    # 由于 Mem0 默认未启用，这里只测试不会报错的场景
+    test_client = TestClient(app)
+    resp = test_client.delete("/api/projects/mem0_test")
+    assert resp.status_code == 200
+    assert resp.json()["deleted"] is True
+    assert not os.path.exists(project_dir)
+
+
+def test_delete_project_cleans_vector_dir_inside_project(tmp_path, monkeypatch):
+    """测试删除项目时清理项目内的向量存储目录"""
+    monkeypatch.setattr(project_service, "PROJECTS_ROOT", str(tmp_path))
+    monkeypatch.setattr(export_service, "PROJECTS_ROOT", str(tmp_path))
+
+    # 创建项目和向量目录
+    project_dir = tmp_path / "vector_test"
+    project_dir.mkdir()
+    vector_dir = project_dir / "data" / "vectors"
+    vector_dir.mkdir(parents=True)
+    (vector_dir / "test.bin").write_text("dummy")
+
+    _write_json(
+        project_dir / "settings.json",
+        {
+            "project_name": "vector_test",
+            "author": "Jamesenh",
+            "initial_chapters": 1,
+            "max_chapters": 10,
+        },
+    )
+
+    monkeypatch.setattr(generation_service, "stop_generation", lambda *a: None)
+    monkeypatch.setattr(generation_service, "clear_runtime_state", lambda *a: 0)
+
+    test_client = TestClient(app)
+    resp = test_client.delete("/api/projects/vector_test")
+    assert resp.status_code == 200
+
+    # 确认整个项目目录（包括向量目录）已被删除
+    assert not os.path.exists(project_dir)
+    assert not os.path.exists(vector_dir)
 
 

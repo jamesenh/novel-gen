@@ -9,8 +9,6 @@ type Props = {
 
 export default function CreateProjectModal({ open, onClose, onCreated }: Props) {
   const [projectName, setProjectName] = useState("");
-  const [world, setWorld] = useState("");
-  const [theme, setTheme] = useState("");
   const [chapters, setChapters] = useState(3);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -27,15 +25,11 @@ export default function CreateProjectModal({ open, onClose, onCreated }: Props) 
     try {
       await createProject({
         project_name: projectName.trim(),
-        world_description: world,
-        theme_description: theme,
         initial_chapters: chapters,
       });
       await onCreated();
       onClose();
       setProjectName("");
-      setWorld("");
-      setTheme("");
       setChapters(3);
     } catch (e: any) {
       setError(e?.response?.data?.detail || "创建失败");
@@ -51,7 +45,7 @@ export default function CreateProjectModal({ open, onClose, onCreated }: Props) 
           <div>
             <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">新建项目</p>
             <h2 className="mt-1 text-xl font-semibold text-slate-900">创建项目</h2>
-            <p className="muted">填写必要信息后即可启动全流程生成。</p>
+            <p className="muted">先创建项目目录，进入详情页再完善世界观等基础配置。</p>
           </div>
           <button className="btn-ghost text-sm" onClick={onClose}>
             关闭
@@ -73,29 +67,9 @@ export default function CreateProjectModal({ open, onClose, onCreated }: Props) 
             <input
               type="number"
               min={1}
-              className="input-field md:max-w-[180px]"
+              className="input-field w-full"
               value={chapters}
               onChange={(e) => setChapters(Number(e.target.value))}
-            />
-          </div>
-          <div className="space-y-2 md:col-span-2">
-            <label className="text-slate-700">世界观描述</label>
-            <textarea
-              className="input-field"
-              rows={3}
-              value={world}
-              onChange={(e) => setWorld(e.target.value)}
-              placeholder="故事发生的世界、规则或背景"
-            />
-          </div>
-          <div className="space-y-2 md:col-span-2">
-            <label className="text-slate-700">主题描述（可选）</label>
-            <textarea
-              className="input-field"
-              rows={2}
-              value={theme}
-              onChange={(e) => setTheme(e.target.value)}
-              placeholder="核心主题、冲突或情绪基调"
             />
           </div>
           {error && <div className="text-sm text-red-500 md:col-span-2">{error}</div>}

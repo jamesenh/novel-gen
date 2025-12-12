@@ -55,13 +55,12 @@ def test_workflow_state_creation():
             verbose=False
         )
         
-        # 创建基本的 settings.json
+        # 创建基本的 settings.json（world/theme 由独立 JSON 文件管理）
         settings_data = {
             "project_name": "test_state",
             "author": "Test Author",
             "llm_model": "gpt-4o-mini",
             "temperature": 0.7,
-            "world_description": "测试世界描述"
         }
         settings_path = os.path.join(orchestrator.project_dir, "settings.json")
         with open(settings_path, 'w', encoding='utf-8') as f:

@@ -3,22 +3,30 @@
 
 开发者: jamesenh
 日期: 2025-12-08
+更新: 2025-12-11 - 增加内容生成接口（LLM 多候选）
 """
 import glob
 import json
+import logging
 import os
+from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, status
 
 from novelgen.api.schemas.content import (
     ChapterContentResponse,
     ChapterMeta,
     ChapterUpdateRequest,
+    ContentGenerateRequest,
+    ContentGenerateResponse,
+    ContentVariant,
     GenericContentPayload,
 )
 from novelgen.models import GeneratedChapter, GeneratedScene
 from novelgen.services import project_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/projects/{name}", tags=["content"])
 
@@ -34,6 +42,275 @@ def _write_json(path: str, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _load_json(path: str):
+    """加载 JSON 文件，不存在返回 None"""
+    if not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+# ==================== 内容生成接口 ====================
+
+
+@router.post("/content/generate", response_model=ContentGenerateResponse)
+async def generate_content(name: str, body: ContentGenerateRequest):
+    """
+    调用 LLM 生成内容草稿（支持多候选）
+    
+    - world: 世界观多候选生成
+    - theme: 主题冲突多候选生成（需先有 world.json）
+    - characters: 角色生成（单候选，需 world + theme，可指定 num_characters）
+    - outline: 大纲生成（单候选，需 world + theme + characters）
+    """
+    project_dir = _ensure_project(name)
+    settings_path = os.path.join(project_dir, "settings.json")
+    settings = _load_json(settings_path) or {}
+    
+    target = body.target
+    user_prompt = body.user_prompt.strip()
+    num_variants = body.num_variants
+    num_characters = body.num_characters
+    num_chapters = body.num_chapters
+    
+    try:
+        if target == "world":
+            variants = await _generate_world_variants(
+                project_dir, settings, user_prompt, num_variants, body.expand
+            )
+        elif target == "theme":
+            variants = await _generate_theme_variants(
+                project_dir, settings, user_prompt, num_variants
+            )
+        elif target == "characters":
+            variants = await _generate_characters_variants(
+                project_dir, settings, num_characters
+            )
+        elif target == "outline":
+            variants = await _generate_outline_variants(
+                project_dir, settings, num_chapters
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"不支持的目标类型: {target}"
+            )
+        
+        return ContentGenerateResponse(
+            target=target,
+            variants=variants,
+            generated_at=datetime.utcnow().isoformat(),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"内容生成失败: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"生成失败: {str(e)}"
+        )
+
+
+async def _generate_world_variants(
+    project_dir: str,
+    settings: dict,
+    user_prompt: str,
+    num_variants: int,
+    expand: bool,
+) -> List[ContentVariant]:
+    """生成世界观多候选
+    
+    更新: 2025-12-11 - 移除 settings.world_description 回退，仅接受 user_prompt
+    """
+    from novelgen.chains.world_chain import generate_world_variants, expand_world_prompt
+    
+    # 必须提供 user_prompt
+    if not user_prompt:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="请提供世界观描述（user_prompt）"
+        )
+    prompt = user_prompt
+    
+    result = generate_world_variants(
+        user_input=prompt,
+        num_variants=num_variants,
+        expand=expand,
+        verbose=False,
+    )
+    
+    variants = []
+    for v in result.variants:
+        variants.append(ContentVariant(
+            variant_id=v.variant_id,
+            style_tag=v.style_tag,
+            brief_description=v.brief_description,
+            payload=v.world_setting.model_dump(),
+        ))
+    return variants
+
+
+async def _generate_theme_variants(
+    project_dir: str,
+    settings: dict,
+    user_prompt: str,
+    num_variants: int,
+) -> List[ContentVariant]:
+    """生成主题冲突多候选（需要已有 world.json）
+    
+    更新: 2025-12-11 - 移除 settings.theme_description 回退，user_prompt 可选（留空则由 AI 自动推断）
+    """
+    from novelgen.chains.theme_conflict_chain import generate_theme_conflict_variants
+    from novelgen.models import WorldSetting
+    
+    world_path = os.path.join(project_dir, "world.json")
+    world_data = _load_json(world_path)
+    if not world_data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="请先生成世界观（world.json 不存在）"
+        )
+    
+    world_setting = WorldSetting(**world_data)
+    # user_prompt 可选，留空则由 AI 根据世界观自动推断主题
+    direction = user_prompt or None
+    
+    result = generate_theme_conflict_variants(
+        world_setting=world_setting,
+        user_direction=direction if direction else None,
+        num_variants=num_variants,
+        verbose=False,
+    )
+    
+    variants = []
+    for v in result.variants:
+        variants.append(ContentVariant(
+            variant_id=v.variant_id,
+            style_tag=v.style_tag,
+            brief_description=v.brief_description,
+            payload=v.theme_conflict.model_dump(),
+        ))
+    return variants
+
+
+async def _generate_characters_variants(
+    project_dir: str,
+    settings: dict,
+    num_characters: Optional[int],
+) -> List[ContentVariant]:
+    """生成角色（单候选，需要 world + theme，支持指定生成角色数量）"""
+    from novelgen.chains.characters_chain import generate_characters
+    from novelgen.models import WorldSetting, ThemeConflict
+    
+    world_path = os.path.join(project_dir, "world.json")
+    theme_path = os.path.join(project_dir, "theme_conflict.json")
+    
+    world_data = _load_json(world_path)
+    theme_data = _load_json(theme_path)
+    
+    if not world_data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="请先生成世界观（world.json 不存在）"
+        )
+    if not theme_data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="请先生成主题冲突（theme_conflict.json 不存在）"
+        )
+    
+    world_setting = WorldSetting(**world_data)
+    theme_conflict = ThemeConflict(**theme_data)
+    
+    try:
+        result = generate_characters(
+            world_setting=world_setting,
+            theme_conflict=theme_conflict,
+            num_characters=num_characters,
+            verbose=False,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        ) from e
+    
+    # 角色暂时只生成单候选
+    return [ContentVariant(
+        variant_id="variant_1",
+        style_tag="默认方案",
+        brief_description=f"主角：{result.protagonist.name}，{result.protagonist.role}",
+        payload=result.model_dump(),
+    )]
+
+
+async def _generate_outline_variants(
+    project_dir: str,
+    settings: dict,
+    num_chapters: Optional[int] = None,
+) -> List[ContentVariant]:
+    """生成大纲（单候选，需要 world + theme + characters）
+    
+    Args:
+        project_dir: 项目目录
+        settings: 项目设置
+        num_chapters: 章节数量（未提供则使用 settings.initial_chapters）
+    """
+    from novelgen.chains.outline_chain import generate_initial_outline
+    from novelgen.models import WorldSetting, ThemeConflict, CharactersConfig
+
+    world_path = os.path.join(project_dir, "world.json")
+    theme_path = os.path.join(project_dir, "theme_conflict.json")
+    characters_path = os.path.join(project_dir, "characters.json")
+
+    world_data = _load_json(world_path)
+    theme_data = _load_json(theme_path)
+    characters_data = _load_json(characters_path)
+
+    if not world_data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="请先生成世界观（world.json 不存在）"
+        )
+    if not theme_data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="请先生成主题冲突（theme_conflict.json 不存在）"
+        )
+    if not characters_data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="请先生成角色（characters.json 不存在）"
+        )
+
+    world_setting = WorldSetting(**world_data)
+    theme_conflict = ThemeConflict(**theme_data)
+    characters = CharactersConfig(**characters_data)
+
+    # 优先使用请求参数，否则使用 settings 中的配置
+    initial_chapters = num_chapters if num_chapters is not None else settings.get("initial_chapters", 5)
+
+    result = generate_initial_outline(
+        world_setting=world_setting,
+        theme_conflict=theme_conflict,
+        characters=characters,
+        initial_chapters=initial_chapters,
+        verbose=False,
+    )
+    
+    # 大纲暂时只生成单候选
+    chapter_count = len(result.chapters)
+    return [ContentVariant(
+        variant_id="variant_1",
+        style_tag="默认方案",
+        brief_description=f"故事前提：{result.story_premise[:80]}...（{chapter_count}章）",
+        payload=result.model_dump(),
+    )]
+
+
+# ==================== 内容读取接口 ====================
 
 
 @router.get("/world")
@@ -52,6 +329,26 @@ async def update_world(name: str, body: GenericContentPayload):
     """更新世界观"""
     project_dir = _ensure_project(name)
     path = os.path.join(project_dir, "world.json")
+    _write_json(path, body.model_dump())
+    return {"updated": True}
+
+
+@router.get("/theme_conflict")
+async def get_theme_conflict(name: str):
+    """主题冲突内容"""
+    project_dir = _ensure_project(name)
+    path = os.path.join(project_dir, "theme_conflict.json")
+    if not os.path.exists(path):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="theme_conflict.json 不存在")
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+@router.put("/theme_conflict")
+async def update_theme_conflict(name: str, body: GenericContentPayload):
+    """更新主题冲突"""
+    project_dir = _ensure_project(name)
+    path = os.path.join(project_dir, "theme_conflict.json")
     _write_json(path, body.model_dump())
     return {"updated": True}
 

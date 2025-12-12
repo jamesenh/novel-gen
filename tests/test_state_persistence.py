@@ -33,7 +33,6 @@ def test_state_to_json_export():
             settings=Settings(
                 project_name='test_export',
                 author='Test Author',
-                world_description='一个测试世界观描述'
             ),
             world=WorldSetting(
                 world_name='测试世界',

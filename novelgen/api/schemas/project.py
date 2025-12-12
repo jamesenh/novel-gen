@@ -38,11 +38,12 @@ class ProjectState(BaseModel):
 
 
 class CreateProjectRequest(BaseModel):
-    """创建项目的请求体"""
+    """创建项目的请求体
+    
+    更新: 2025-12-11 - 移除 world_description/theme_description，由独立内容生成接口管理
+    """
 
     project_name: str = Field(description="项目名称")
-    world_description: str = Field(default="", description="世界观描述（可选）")
-    theme_description: str = Field(default="", description="主题描述（可选）")
     initial_chapters: int = Field(default=3, description="初始章节数")
 
 

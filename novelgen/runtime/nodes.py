@@ -106,25 +106,25 @@ def world_creation_node(state: NovelGenerationState) -> Dict[str, Any]:
     """
     世界观生成节点
     
-    调用 generate_world chain 生成世界观设定
+    优先加载已有 world.json，若不存在则报错提示用户通过内容生成接口创建
+    
+    更新: 2025-12-11 - 不再从 settings.world_description 生成，需先通过内容生成 API 创建 world.json
     """
     new_count = _increment_node_count(state)
     
     try:
         if state.settings is None:
-            raise ValueError("settings 未加载，无法生成世界观")
+            raise ValueError("settings 未加载，无法继续")
         
-        # 调用现有 chain
-        world = generate_world(
-            user_input=state.settings.world_description,
-            verbose=state.verbose,
-            show_prompt=state.show_prompt
-        )
-        
-        # 保存到 JSON
+        # 优先加载已有 world.json
         world_path = os.path.join(state.project_dir, "world.json")
-        with open(world_path, 'w', encoding='utf-8') as f:
-            json.dump(world.model_dump(), f, ensure_ascii=False, indent=2)
+        if os.path.exists(world_path):
+            with open(world_path, 'r', encoding='utf-8') as f:
+                world_data = json.load(f)
+            world = WorldSetting(**world_data)
+        else:
+            # 不再自动生成，要求用户先通过内容生成接口创建
+            raise ValueError("world.json 不存在，请先通过内容生成接口创建世界观")
         
         return {
             "world": world,
@@ -146,7 +146,9 @@ def theme_conflict_creation_node(state: NovelGenerationState) -> Dict[str, Any]:
     """
     主题冲突生成节点
     
-    调用 generate_theme_conflict chain 生成主题与冲突
+    优先加载已有 theme_conflict.json，若不存在则报错提示用户通过内容生成接口创建
+    
+    更新: 2025-12-11 - 不再从 settings.theme_description 生成，需先通过内容生成 API 创建 theme_conflict.json
     """
     new_count = _increment_node_count(state)
     
@@ -154,17 +156,15 @@ def theme_conflict_creation_node(state: NovelGenerationState) -> Dict[str, Any]:
         if state.settings is None or state.world is None:
             raise ValueError("settings 或 world 未加载")
         
-        theme_conflict = generate_theme_conflict(
-            world_setting=state.world,
-            user_input=state.settings.theme_description or "",
-            verbose=state.verbose,
-            show_prompt=state.show_prompt
-        )
-        
-        # 保存到 JSON
+        # 优先加载已有 theme_conflict.json
         theme_path = os.path.join(state.project_dir, "theme_conflict.json")
-        with open(theme_path, 'w', encoding='utf-8') as f:
-            json.dump(theme_conflict.model_dump(), f, ensure_ascii=False, indent=2)
+        if os.path.exists(theme_path):
+            with open(theme_path, 'r', encoding='utf-8') as f:
+                theme_data = json.load(f)
+            theme_conflict = ThemeConflict(**theme_data)
+        else:
+            # 不再自动生成，要求用户先通过内容生成接口创建
+            raise ValueError("theme_conflict.json 不存在，请先通过内容生成接口创建主题冲突")
         
         return {
             "theme_conflict": theme_conflict,

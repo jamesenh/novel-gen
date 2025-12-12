@@ -3,6 +3,9 @@ import {
   ChapterContent,
   ChapterMeta,
   CharactersData,
+  ContentGenerateRequest,
+  ContentGenerateResponse,
+  ContentTarget,
   LogEntry,
   OutlineData,
   ChapterUpdatePayload,
@@ -27,8 +30,6 @@ export async function listProjects(): Promise<ProjectSummary[]> {
 
 export async function createProject(payload: {
   project_name: string;
-  world_description: string;
-  theme_description?: string;
   initial_chapters?: number;
 }): Promise<ProjectDetail> {
   const res = await client.post<ProjectDetail>("/projects", payload);
@@ -115,5 +116,95 @@ export async function fetchOutline(project: string): Promise<OutlineData> {
 export async function rollbackProject(project: string, payload: RollbackRequest): Promise<RollbackResult> {
   const res = await client.post<RollbackResult>(`/projects/${project}/rollback`, payload);
   return res.data;
+}
+
+export type DeleteProjectResult = {
+  deleted: boolean;
+  project_name: string;
+  details: {
+    deleted_files: boolean;
+    cleared_redis: number;
+    cleared_mem0: boolean;
+    deleted_vectors: boolean;
+  };
+};
+
+export async function deleteProject(project: string): Promise<DeleteProjectResult> {
+  const res = await client.delete<DeleteProjectResult>(`/projects/${project}`);
+  return res.data;
+}
+
+// ==================== 内容生成 ====================
+
+/**
+ * 调用 LLM 生成内容草稿（支持多候选）
+ * 
+ * @param project 项目名称
+ * @param request 生成请求参数
+ * @returns 多候选生成结果
+ */
+export async function generateContent(
+  project: string,
+  request: ContentGenerateRequest,
+): Promise<ContentGenerateResponse> {
+  // LLM 生成可能需要较长时间，使用 120 秒超时
+  const res = await client.post<ContentGenerateResponse>(
+    `/projects/${project}/content/generate`,
+    request,
+    { timeout: 120000 },
+  );
+  return res.data;
+}
+
+/**
+ * 保存内容到对应的 JSON 文件
+ * 
+ * @param project 项目名称
+ * @param target 目标类型
+ * @param payload 内容数据
+ */
+export async function saveContent(
+  project: string,
+  target: ContentTarget,
+  payload: Record<string, any>,
+): Promise<{ updated: boolean }> {
+  const endpoints: Record<ContentTarget, string> = {
+    world: `/projects/${project}/world`,
+    theme: `/projects/${project}/theme_conflict`,
+    characters: `/projects/${project}/characters`,
+    outline: `/projects/${project}/outline`,
+  };
+  
+  const res = await client.put<{ updated: boolean }>(endpoints[target], payload);
+  return res.data;
+}
+
+/**
+ * 获取内容（如果存在）
+ * 
+ * @param project 项目名称
+ * @param target 目标类型
+ * @returns 内容数据或 null（不存在时）
+ */
+export async function fetchContent(
+  project: string,
+  target: ContentTarget,
+): Promise<Record<string, any> | null> {
+  const endpoints: Record<ContentTarget, string> = {
+    world: `/projects/${project}/world`,
+    theme: `/projects/${project}/theme_conflict`,
+    characters: `/projects/${project}/characters`,
+    outline: `/projects/${project}/outline`,
+  };
+  
+  try {
+    const res = await client.get<Record<string, any>>(endpoints[target]);
+    return res.data;
+  } catch (e: any) {
+    if (e?.response?.status === 404) {
+      return null;
+    }
+    throw e;
+  }
 }
 
