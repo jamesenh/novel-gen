@@ -2,6 +2,7 @@
 配置管理
 管理LLM配置、API密钥等
 
+作者: jamesenh, 2025-12-17
 更新: 2025-11-25 - 简化配置，移除独立的 SQLite 和 VectorStore 相关配置
 """
 import os
@@ -130,7 +131,8 @@ class LLMConfig(BaseModel):
                 "chapter_memory_chain": {"model_name": "gpt-4o-mini", "max_tokens": 2000},
                 "consistency_chain": {"model_name": "gpt-4o-mini", "max_tokens": 4000},
                 "revision_chain": {"model_name": "gpt-4o-mini", "max_tokens": 8000},
-                "memory_context_chain": {"model_name": "gpt-4o-mini", "max_tokens": 1000}
+                "memory_context_chain": {"model_name": "gpt-4o-mini", "max_tokens": 1000},
+                "logic_review_chain": {"model_name": "gpt-4o-mini", "max_tokens": 4000}
             }
 
             if self.chain_name in default_configs:
@@ -166,6 +168,7 @@ class ProjectConfig(BaseModel):
     注意：
     - 使用 Mem0 作为唯一的记忆层，必须启用 Mem0（设置 MEM0_ENABLED=true）
     - Mem0 内部使用 ChromaDB 存储向量，路径由 vector_store_dir 配置
+    - 图谱层使用 Kùzu 嵌入式数据库，存储在 project_dir/data/graph/
     """
 
     project_dir: str = Field(description="项目目录")
@@ -182,6 +185,25 @@ class ProjectConfig(BaseModel):
     world_variants_count: int = Field(
         default=3,
         description="世界观候选生成数量（2-5），通过 WORLD_VARIANTS_COUNT 环境变量配置"
+    )
+    # 图谱层配置
+    graph_enabled: bool = Field(
+        default=True,
+        description="是否启用 Kùzu 图谱层，通过 NOVELGEN_GRAPH_ENABLED 环境变量配置"
+    )
+    graph_dir: Optional[str] = Field(
+        default=None,
+        description="Kùzu 图谱存储目录，默认使用 project_dir/data/graph/"
+    )
+    # 逻辑审查质量闸门配置
+    # 开发者: jamesenh, 开发时间: 2025-12-16
+    logic_review_policy: Literal["off", "blocking"] = Field(
+        default="off",
+        description="逻辑审查策略：off(不启用), blocking(阻断模式)"
+    )
+    logic_review_min_score: int = Field(
+        default=75,
+        description="逻辑审查评分阈值（0-100），低于此分数将触发阻断"
     )
 
     def __init__(self, **data):
@@ -207,6 +229,33 @@ class ProjectConfig(BaseModel):
                     data["world_variants_count"] = max(2, min(5, count))
                 except ValueError:
                     pass  # 无效值，使用默认值 3
+
+        # 从环境变量读取图谱层配置
+        if "graph_enabled" not in data:
+            env_graph_enabled = os.getenv("NOVELGEN_GRAPH_ENABLED", "true").lower()
+            data["graph_enabled"] = env_graph_enabled in ("true", "1", "yes", "on")
+        
+        if "graph_dir" not in data:
+            env_graph_dir = os.getenv("NOVELGEN_GRAPH_DIR")
+            if env_graph_dir:
+                data["graph_dir"] = env_graph_dir
+        
+        # 从环境变量读取逻辑审查配置（如果未在参数中提供）
+        # 开发者: jamesenh, 开发时间: 2025-12-16
+        if "logic_review_policy" not in data:
+            env_policy = os.getenv("NOVELGEN_LOGIC_REVIEW_POLICY", "off")
+            if env_policy in ("off", "blocking"):
+                data["logic_review_policy"] = env_policy
+        
+        if "logic_review_min_score" not in data:
+            env_min_score = os.getenv("NOVELGEN_LOGIC_REVIEW_MIN_SCORE")
+            if env_min_score:
+                try:
+                    score = int(env_min_score)
+                    # 限制在 0-100 范围内
+                    data["logic_review_min_score"] = max(0, min(100, score))
+                except ValueError:
+                    pass  # 无效值，使用默认值 75
 
         super().__init__(**data)
         
@@ -288,6 +337,10 @@ class ProjectConfig(BaseModel):
         default_factory=lambda: ChainConfig(chain_name="memory_context_chain"),
         description="记忆上下文检索链配置"
     )
+    logic_review_chain_config: ChainConfig = Field(
+        default_factory=lambda: ChainConfig(chain_name="logic_review_chain"),
+        description="逻辑审查链配置"
+    )
     embedding_config: EmbeddingConfig = Field(
         default_factory=EmbeddingConfig,
         description="Embedding模型配置"
@@ -335,6 +388,11 @@ class ProjectConfig(BaseModel):
     def consistency_report_file(self) -> str:
         return os.path.join(self.project_dir, "consistency_reports.json")
 
+    @property
+    def reviews_dir(self) -> str:
+        """逻辑审查报告目录"""
+        return os.path.join(self.project_dir, "reviews")
+
     def get_vector_store_dir(self) -> str:
         """获取向量存储目录路径（用于 Mem0 内部 ChromaDB）
         
@@ -348,6 +406,20 @@ class ProjectConfig(BaseModel):
             return os.path.join(self.project_dir, self.vector_store_dir)
         # 默认使用 project_dir/data/vectors
         return os.path.join(self.project_dir, "data", "vectors")
+
+    def get_graph_dir(self) -> str:
+        """获取 Kùzu 图谱存储目录路径
+        
+        如果未设置则返回默认路径 project_dir/data/graph/
+        """
+        if self.graph_dir:
+            # 如果是绝对路径，直接返回
+            if os.path.isabs(self.graph_dir):
+                return self.graph_dir
+            # 如果是相对路径，相对于 project_dir
+            return os.path.join(self.project_dir, self.graph_dir)
+        # 默认使用 project_dir/data/graph
+        return os.path.join(self.project_dir, "data", "graph")
 
 
 # 解决前向引用：在所有类定义完成后，导入 Mem0Config 并重建 ProjectConfig 模型

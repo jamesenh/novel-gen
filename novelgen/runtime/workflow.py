@@ -2,6 +2,7 @@
 LangGraph 工作流定义
 定义小说生成的 StateGraph 工作流
 
+作者: jamesenh, 2025-12-17
 开发者: jamesenh, 开发时间: 2025-11-21
 更新: 2025-11-25 - 使用 SqliteSaver 替代 MemorySaver 实现检查点持久化
 更新: 2025-11-27 - 添加条件边实现状态持久化，自动跳过已完成的节点
@@ -64,7 +65,9 @@ from novelgen.runtime.nodes import (
     save_scene_node,
     next_scene_node,
     has_more_scenes,
-    skip_scene_node
+    skip_scene_node,
+    # 逻辑审查节点
+    chapter_logic_review_node
 )
 
 
@@ -246,6 +249,12 @@ def create_novel_generation_workflow(checkpointer=None, project_dir: Optional[st
     # 输出：state.chapters[n] (GeneratedChapter 对象)，保存到 chapters/chapter_XXX.json
     workflow.add_node("chapter_generation", scene_generation_wrapper_node)
     
+    # 逻辑审查节点：检查新生成章节的逻辑连贯性（可配置）
+    # 输入：state.chapters[current], state.chapters_plan[current]
+    # 输出：如果启用且触发阻断，写入 pending revision
+    # 开发者: jamesenh, 开发时间: 2025-12-16
+    workflow.add_node("chapter_logic_review", chapter_logic_review_node)
+    
     # 一致性检查节点：检查新生成章节与已有内容的一致性
     # 输入：state.chapters[current], state.characters, state.world
     # 输出：state.consistency_reports[n] (ConsistencyReport 对象)
@@ -402,8 +411,36 @@ def create_novel_generation_workflow(checkpointer=None, project_dir: Optional[st
         }
     )
 
-    # chapter_generation → consistency_check
-    workflow.add_edge("chapter_generation", "consistency_check")
+    # chapter_generation → chapter_logic_review
+    workflow.add_edge("chapter_generation", "chapter_logic_review")
+    
+    # 条件分支：逻辑审查后决定是继续到一致性检查还是因阻断而结束
+    # 开发者: jamesenh, 开发时间: 2025-12-16
+    def should_continue_after_logic_review(state: NovelGenerationState) -> Literal["continue", "end"]:
+        """
+        判断逻辑审查后是否继续
+        
+        检查是否存在逻辑审查触发的阻断（pending revision）
+        """
+        chapter_number = state.current_chapter_number
+        if chapter_number is None:
+            return "continue"
+        
+        # 检查是否在 error_messages 中有逻辑审查阻断标记
+        block_key = f"logic_review_block_{chapter_number}"
+        if block_key in state.error_messages:
+            return "end"
+        
+        return "continue"
+    
+    workflow.add_conditional_edges(
+        "chapter_logic_review",
+        should_continue_after_logic_review,
+        {
+            "continue": "consistency_check",
+            "end": END
+        }
+    )
 
     # skip_chapter_generation → next_chapter（跳过的章节直接进入下一章判断）
     workflow.add_edge("skip_chapter_generation", "next_chapter")

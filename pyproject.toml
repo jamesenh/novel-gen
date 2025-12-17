@@ -32,6 +32,8 @@ dependencies = [
     "mem0ai>=0.1.0",
     "pytest>=9.0.1",
     "typer>=0.9.0",
+    "kuzu>=0.7.0",
+    "rich>=13.0.0",
 ]
 
 [project.scripts]

@@ -34,6 +34,22 @@ ng status <project>  # 查看状态
 ng state <project>   # 详细状态
 ng export <project>  # 导出
 ng rollback <project> --step/--chapter  # 回滚
+ng chat <project>    # 对话式 Agent
+
+# 世界观/主题冲突候选（可选但推荐）
+ng world-variants <project> --prompt "修仙世界" --expand
+ng world-select <project> variant_1
+ng world-show <project>
+ng theme-variants <project> --direction "复仇"
+ng theme-select <project> variant_1
+ng theme-show <project>
+
+# 图谱（可选）
+ng graph rebuild <project>
+ng graph whois <project> <name>
+ng graph relations <project> <name> --with <name>
+ng graph events <project> [name] --chapter <N>
+ng graph stats <project>
 ```
 
 ---
@@ -239,4 +255,3 @@ frontend/
 5. **与现有 CLI 的关系**
    - Web 是完全替代 CLI 还是并存？
    - API 层如何复用现有代码？
-

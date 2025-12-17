@@ -2,6 +2,7 @@
 LangGraph 节点包装器
 为现有 LangChain chains 提供 LangGraph 节点接口
 
+作者: jamesenh, 2025-12-17
 开发者: jamesenh, 开发时间: 2025-11-21
 更新: 2025-11-27 - 修复 Mem0 集成问题，添加记忆上下文检索功能
 更新: 2025-11-28 - 添加动态章节扩展节点（evaluate_story_progress, extend_outline, plan_new_chapters）
@@ -18,7 +19,7 @@ from novelgen.models import (
     NovelGenerationState, Settings, WorldSetting, ThemeConflict,
     CharactersConfig, Outline, ChapterPlan, GeneratedChapter, GeneratedScene,
     ChapterMemoryEntry, ConsistencyReport, SceneMemoryContext,
-    StoryProgressEvaluation, SceneGenerationState
+    StoryProgressEvaluation, SceneGenerationState, LogicReviewReport, RevisionStatus
 )
 from novelgen.chains.world_chain import generate_world
 from novelgen.chains.theme_conflict_chain import generate_theme_conflict
@@ -707,7 +708,7 @@ def _generate_and_save_chapter_memory(
 
 def _append_chapter_memory_entry(project_dir: str, memory_entry: ChapterMemoryEntry):
     """
-    将章节记忆条目追加到 chapter_memory.json
+    将章节记忆条目追加到 chapter_memory.json，并触发图谱更新
     
     Args:
         project_dir: 项目目录
@@ -730,6 +731,126 @@ def _append_chapter_memory_entry(project_dir: str, memory_entry: ChapterMemoryEn
     # 保存
     with open(memory_file, 'w', encoding='utf-8') as f:
         json.dump(existing_memories, f, ensure_ascii=False, indent=2)
+    
+    # 触发图谱更新（异步/失败不阻断主流程）
+    _update_graph_after_chapter_memory(project_dir, memory_entry)
+
+
+def _build_chapter_context_with_preferences(
+    project_dir: str,
+    project_name: str,
+    chapter_number: int,
+    verbose: bool = False,
+    preference_limit: int = 5,
+    memory_chapters: int = 3
+) -> str:
+    """
+    构建包含偏好和最近章节记忆的章节上下文
+    
+    用于场景生成前注入到 prompt 中，使生成结果更符合用户偏好。
+    
+    Args:
+        project_dir: 项目目录
+        project_name: 项目名称
+        chapter_number: 当前章节编号
+        verbose: 是否输出详细日志
+        preference_limit: 偏好检索数量限制（默认 5）
+        memory_chapters: 参考的最近章节数量（默认 3）
+        
+    Returns:
+        格式化的章节上下文字符串（JSON）
+    """
+    context = {
+        "preferences": [],
+        "recent_chapters": []
+    }
+    
+    # 1. 检索项目偏好
+    try:
+        mem0_manager = _get_mem0_manager(project_dir, project_name)
+        if mem0_manager is not None:
+            preferences = mem0_manager.search_user_preferences(limit=preference_limit)
+            for pref in preferences:
+                if isinstance(pref, dict):
+                    content = pref.get("memory", pref.get("content", str(pref)))
+                    context["preferences"].append(content)
+            
+            if context["preferences"] and verbose:
+                print(f"  📝 已加载 {len(context['preferences'])} 条写作偏好")
+    except Exception as e:
+        if verbose:
+            print(f"  ⚠️ 偏好检索失败（不影响生成）: {e}")
+    
+    # 2. 加载最近章节记忆
+    try:
+        chapter_memory_file = os.path.join(project_dir, "chapter_memory.json")
+        if os.path.exists(chapter_memory_file):
+            with open(chapter_memory_file, 'r', encoding='utf-8') as f:
+                all_memories = json.load(f)
+            
+            # 筛选当前章节之前的记忆，按章节号倒序
+            relevant_memories = [
+                m for m in all_memories 
+                if m.get("chapter_number", 0) < chapter_number
+            ]
+            relevant_memories.sort(key=lambda x: x.get("chapter_number", 0), reverse=True)
+            
+            # 取最近 N 章
+            for mem in relevant_memories[:memory_chapters]:
+                chapter_summary = {
+                    "chapter_number": mem.get("chapter_number"),
+                    "chapter_title": mem.get("chapter_title", ""),
+                    "summary": mem.get("summary", ""),
+                    "key_events": mem.get("key_events", []),
+                    "character_states": mem.get("character_states", {}),
+                    "unresolved_threads": mem.get("unresolved_threads", [])
+                }
+                context["recent_chapters"].append(chapter_summary)
+            
+            if context["recent_chapters"] and verbose:
+                print(f"  📚 已加载最近 {len(context['recent_chapters'])} 章记忆")
+    except Exception as e:
+        if verbose:
+            print(f"  ⚠️ 章节记忆加载失败（不影响生成）: {e}")
+    
+    # 如果没有任何上下文，返回空
+    if not context["preferences"] and not context["recent_chapters"]:
+        return ""
+    
+    return json.dumps(context, ensure_ascii=False, indent=2)
+
+
+def _update_graph_after_chapter_memory(project_dir: str, memory_entry: ChapterMemoryEntry):
+    """
+    章节记忆写入成功后，增量更新 Kùzu 图谱
+    
+    失败时仅记录警告，不阻断主流程。
+    
+    Args:
+        project_dir: 项目目录
+        memory_entry: 章节记忆条目
+    """
+    try:
+        from novelgen.graph.updater import create_graph_updater
+        
+        updater = create_graph_updater(project_dir)
+        if updater is None:
+            # 图谱功能未启用或不可用，静默跳过
+            return
+        
+        result = updater.update_chapter(memory_entry)
+        
+        if result["success"]:
+            if result["events_added"] > 0:
+                print(f"📊 图谱已更新: 第{memory_entry.chapter_number}章 (+{result['events_added']} 事件)")
+        else:
+            # 记录警告但不阻断
+            for error in result.get("errors", []):
+                print(f"⚠️ 图谱更新警告: {error}")
+                
+    except Exception as e:
+        # 捕获所有异常，确保不阻断主流程
+        print(f"⚠️ 图谱更新失败（不影响生成）: {e}")
 
 
 def _update_character_states_to_mem0(
@@ -1395,6 +1516,7 @@ def generate_scene_node(state: SceneGenerationState) -> Dict[str, Any]:
     生成单个场景文本
     
     开发者: jamesenh, 开发时间: 2025-11-28
+    更新: 2025-12-15 - 添加偏好检索和注入功能
     """
     scene_num = state.current_scene_number
     
@@ -1406,13 +1528,21 @@ def generate_scene_node(state: SceneGenerationState) -> Dict[str, Any]:
     
     print(f"  ✍️ 生成场景 {scene_num}...")
     
+    # 构建章节上下文（包含偏好和最近章节记忆）
+    chapter_context = _build_chapter_context_with_preferences(
+        project_dir=state.project_dir,
+        project_name=state.project_name,
+        chapter_number=state.chapter_number,
+        verbose=state.verbose
+    )
+    
     # 调用场景生成链
     scene = generate_scene_text(
         scene_plan=scene_plan,
         world_setting=state.world,
         characters=state.characters,
         previous_summary=state.previous_summary,
-        chapter_context="",
+        chapter_context=chapter_context,
         scene_memory_context=state.scene_memory_context,
         verbose=state.verbose,
         show_prompt=state.show_prompt
@@ -1737,6 +1867,162 @@ def scene_generation_wrapper_node(state: NovelGenerationState) -> Dict[str, Any]
             "current_step": "chapter_generation",
             "failed_steps": state.failed_steps + ["chapter_generation"],
             "error_messages": {**state.error_messages, "chapter_generation": str(e)},
+            "node_execution_count": new_count
+        }
+
+
+# ============================================================================
+# 逻辑审查节点
+# ============================================================================
+
+def chapter_logic_review_node(state: NovelGenerationState) -> Dict[str, Any]:
+    """
+    章节逻辑审查节点
+    
+    在章节生成完成后执行逻辑审查，检测因果链断裂、动机不合理、衔接突兀等问题。
+    若触发阻断条件，写入审查报告和 pending revision 文件。
+    
+    阻断条件：
+    1. overall_score < logic_review_min_score
+    2. 存在 severity == "high" 的 issue
+    
+    开发者: jamesenh, 开发时间: 2025-12-16
+    """
+    new_count = _increment_node_count(state)
+    chapter_number = state.current_chapter_number
+    
+    try:
+        # 1. 检查 logic_review_policy
+        from novelgen.config import ProjectConfig
+        config = ProjectConfig(project_dir=state.project_dir)
+        
+        if config.logic_review_policy == "off":
+            # 逻辑审查未启用，跳过
+            print(f"⏭️ 逻辑审查未启用（policy=off），跳过第 {chapter_number} 章审查")
+            return {
+                "current_step": "chapter_logic_review",
+                "completed_steps": state.completed_steps + [f"chapter_logic_review_{chapter_number}_skipped"],
+                "node_execution_count": new_count
+            }
+        
+        # 2. 获取章节数据
+        if chapter_number is None:
+            raise ValueError("current_chapter_number 未设置")
+        
+        if chapter_number not in state.chapters:
+            raise ValueError(f"章节 {chapter_number} 尚未生成")
+        
+        chapter = state.chapters[chapter_number]
+        chapter_plan = state.chapters_plan.get(chapter_number)
+        
+        if chapter_plan is None:
+            raise ValueError(f"章节 {chapter_number} 的计划不存在")
+        
+        # 3. 准备审查输入
+        import json
+        chapter_plan_json = json.dumps(chapter_plan.model_dump(), ensure_ascii=False, indent=2)
+        chapter_text = _collect_chapter_text(chapter)
+        chapter_context = _build_context_payload(state, chapter_number)
+        
+        # 4. 执行逻辑审查
+        print(f"🔍 正在对第 {chapter_number} 章进行逻辑审查...")
+        from novelgen.chains.logic_review_chain import run_logic_review
+        
+        report = run_logic_review(
+            chapter_number=chapter_number,
+            chapter_plan=chapter_plan_json,
+            chapter_text=chapter_text,
+            chapter_context=chapter_context,
+            verbose=state.verbose,
+            llm_config=config.logic_review_chain_config.llm_config,
+            show_prompt=state.show_prompt
+        )
+        
+        # 5. 保存审查报告
+        reviews_dir = os.path.join(state.project_dir, "reviews")
+        os.makedirs(reviews_dir, exist_ok=True)
+        
+        report_path = os.path.join(reviews_dir, f"chapter_{chapter_number:03d}_logic_review.json")
+        with open(report_path, 'w', encoding='utf-8') as f:
+            json.dump(report.model_dump(), f, ensure_ascii=False, indent=2)
+        print(f"📄 逻辑审查报告已保存: {report_path}")
+        
+        # 6. 判断是否触发阻断
+        min_score = config.logic_review_min_score
+        should_block = report.should_block(min_score)
+        
+        if should_block:
+            # 输出阻断原因
+            block_reasons = []
+            if report.overall_score < min_score:
+                block_reasons.append(f"评分 {report.overall_score} < 阈值 {min_score}")
+            if report.high_issues_count > 0:
+                block_reasons.append(f"存在 {report.high_issues_count} 个高严重性问题")
+            
+            print(f"⚠️ 第 {chapter_number} 章触发逻辑审查阻断：{', '.join(block_reasons)}")
+            
+            # 写入 pending revision
+            revision_status = RevisionStatus(
+                chapter_number=chapter_number,
+                status="pending",
+                revision_notes=f"逻辑审查触发阻断：{', '.join(block_reasons)}。详见 {report_path}",
+                issues=[],  # 逻辑审查问题在报告中，这里不重复
+                revised_chapter=None,
+                created_at=datetime.now().isoformat(),
+                decision_at=None,
+                triggered_by="logic_review"
+            )
+            
+            revision_path = os.path.join(
+                state.project_dir, "chapters", f"chapter_{chapter_number:03d}_revision.json"
+            )
+            with open(revision_path, 'w', encoding='utf-8') as f:
+                json.dump(revision_status.model_dump(), f, ensure_ascii=False, indent=2)
+            print(f"🛑 已创建 pending revision: {revision_path}")
+            
+            # 返回阻断状态 - 工作流将正常结束（checkpoint 落盘），但后续章节被阻止
+            return {
+                "current_step": "chapter_logic_review",
+                "completed_steps": state.completed_steps + [f"chapter_logic_review_{chapter_number}_blocked"],
+                "node_execution_count": new_count,
+                # 将阻断信息存入错误消息，供上层读取
+                "error_messages": {
+                    **state.error_messages,
+                    f"logic_review_block_{chapter_number}": json.dumps({
+                        "blocked_chapter": chapter_number,
+                        "observed_score": report.overall_score,
+                        "min_score": min_score,
+                        "high_issues_count": report.high_issues_count,
+                        "logic_review_report_file": report_path,
+                        "revision_status_file": revision_path,
+                        "next_actions": ["review", "generate_candidate", "apply_revision", "regen", "rollback"]
+                    }, ensure_ascii=False)
+                }
+            }
+        
+        # 未触发阻断
+        issue_count = len(report.issues)
+        if issue_count == 0:
+            print(f"✅ 第 {chapter_number} 章逻辑审查通过（{report.overall_score}分），无问题")
+        else:
+            severity_summary = {}
+            for issue in report.issues:
+                severity_summary[issue.severity] = severity_summary.get(issue.severity, 0) + 1
+            severity_info = ", ".join([f"{k}({v})" for k, v in severity_summary.items()])
+            print(f"✅ 第 {chapter_number} 章逻辑审查通过（{report.overall_score}分），{issue_count} 个问题: {severity_info}")
+        
+        return {
+            "current_step": "chapter_logic_review",
+            "completed_steps": state.completed_steps + [f"chapter_logic_review_{chapter_number}"],
+            "node_execution_count": new_count
+        }
+    
+    except Exception as e:
+        print(f"❌ 逻辑审查失败：{str(e)}")
+        return {
+            "current_step": "chapter_logic_review",
+            "failed_steps": state.failed_steps + [f"chapter_logic_review_{chapter_number}"],
+            "error_messages": {**state.error_messages, f"chapter_logic_review_{chapter_number}": str(e)},
             "node_execution_count": new_count
         }
 

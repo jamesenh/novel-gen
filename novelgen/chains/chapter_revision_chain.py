@@ -1,190 +1,408 @@
 """
 章节修订链
-基于一致性检测结果对章节内容进行结构化修订
+基于逻辑审查报告或一致性问题生成修订后的章节内容
+
+核心功能：
+- 根据审查报告中的问题，指导 LLM 修复章节
+- 保持原有叙事结构和风格
+- 针对性修复高严重性问题
+- 兼容旧的一致性检测触发的修订流程
+
+作者: jamesenh, 2025-12-17
+开发者: jamesenh, 开发时间: 2025-12-16
 """
+import json
+from typing import Optional, List
+
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import PydanticOutputParser
-from novelgen.models import GeneratedChapter
-from novelgen.llm import get_llm, get_structured_llm
-from novelgen.chains.output_fixing import LLMJsonRepairOutputParser
+
+from novelgen.llm import get_llm
+from novelgen.models import (
+    GeneratedChapter, GeneratedScene,
+    LogicReviewReport, LogicReviewIssue,
+    ChapterPlan, WorldSetting, CharactersConfig
+)
 
 
-def create_revision_chain(verbose: bool = False, llm_config=None, show_prompt: bool = True):
-    """创建章节修订链
+REVISION_PROMPT = """你是一位专业的小说修订编辑。你的任务是根据逻辑审查报告，修订章节内容，修复其中的问题。
+
+## 原章节信息
+
+**章节编号**: {chapter_number}
+**章节标题**: {chapter_title}
+
+### 原章节内容
+
+{original_content}
+
+## 逻辑审查报告
+
+**整体评分**: {overall_score}/100
+**审查摘要**: {review_summary}
+
+### 发现的问题
+
+{issues_description}
+
+## 章节计划（参考）
+
+{chapter_plan_info}
+
+## 世界观与角色（参考）
+
+{world_and_characters_info}
+
+---
+
+## 修订要求
+
+请根据以上审查报告中指出的问题，修订章节内容。修订时请注意：
+
+1. **保持叙事连贯性**：不要大幅改变故事走向，只修复具体问题
+2. **保持风格一致**：修订后的文字风格应与原文一致
+3. **针对性修复**：重点关注 high 严重性的问题，medium 问题适度改进
+4. **保持字数**：修订后的章节字数应与原章节相近（±10%）
+
+请输出修订后的完整章节内容（以 JSON 格式）：
+
+```json
+{{
+    "chapter_number": {chapter_number},
+    "chapter_title": "章节标题",
+    "scenes": [
+        {{
+            "scene_number": 1,
+            "content": "场景内容...",
+            "word_count": 1000
+        }}
+    ],
+    "total_words": 3000
+}}
+```
+
+请直接输出 JSON，不要包含其他解释。
+"""
+
+
+def _format_issues_description(issues: List[LogicReviewIssue]) -> str:
+    """格式化问题描述"""
+    if not issues:
+        return "无明显问题"
     
-    优先使用 structured_output 模式。
-    注：由于此链处理长正文，后续可考虑拆分为"结构 + 正文"两步生成。
+    lines = []
+    for i, issue in enumerate(issues, 1):
+        severity_icon = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(issue.severity, "⚪")
+        lines.append(f"{i}. {severity_icon} [{issue.severity}] {issue.issue_type}")
+        lines.append(f"   描述：{issue.description}")
+        if issue.evidence:
+            lines.append(f"   证据：{issue.evidence[:100]}...")
+        if issue.fix_instructions:
+            lines.append(f"   建议：{issue.fix_instructions}")
+        lines.append("")
+    
+    return "\n".join(lines)
+
+
+def _format_chapter_plan(plan: Optional[ChapterPlan]) -> str:
+    """格式化章节计划信息"""
+    if plan is None:
+        return "（章节计划不可用）"
+    
+    lines = [
+        f"**章节主题**: {plan.chapter_theme}",
+        f"**章节目标**: {plan.chapter_goals}",
+        "",
+        "**场景列表**:"
+    ]
+    
+    for scene in plan.scenes[:3]:  # 只显示前 3 个场景概要
+        lines.append(f"  - 场景 {scene.scene_number}: {scene.scene_description[:50]}...")
+    
+    if len(plan.scenes) > 3:
+        lines.append(f"  ... 共 {len(plan.scenes)} 个场景")
+    
+    return "\n".join(lines)
+
+
+def _format_world_and_characters(
+    world: Optional[WorldSetting],
+    characters: Optional[CharactersConfig]
+) -> str:
+    """格式化世界观和角色信息"""
+    lines = []
+    
+    if world:
+        lines.append(f"**世界**: {world.world_name}")
+        lines.append(f"**时代**: {world.time_period}")
+        if world.power_system:
+            lines.append(f"**力量体系**: {world.power_system}")
+    
+    if characters and characters.main_characters:
+        lines.append("")
+        lines.append("**主要角色**:")
+        for char in characters.main_characters[:3]:
+            lines.append(f"  - {char.name}: {char.role}")
+    
+    return "\n".join(lines) if lines else "（世界观与角色信息不可用）"
+
+
+def generate_revised_chapter(
+    original_chapter: GeneratedChapter,
+    review_report: Optional[LogicReviewReport],
+    chapter_plan: Optional[ChapterPlan] = None,
+    world_setting: Optional[WorldSetting] = None,
+    characters: Optional[CharactersConfig] = None,
+    verbose: bool = False,
+    llm_config: Optional[dict] = None
+) -> GeneratedChapter:
+    """生成修订后的章节
+
+    Args:
+        original_chapter: 原始章节
+        review_report: 逻辑审查报告（可选，如果没有则只做轻微润色）
+        chapter_plan: 章节计划（可选，用于参考）
+        world_setting: 世界观设定（可选）
+        characters: 角色配置（可选）
+        verbose: 是否输出详细信息
+        llm_config: LLM 配置
+
+    Returns:
+        修订后的章节
     """
-    if llm_config is None or llm_config.use_structured_output:
-        try:
-            structured_llm = get_structured_llm(
-                pydantic_model=GeneratedChapter,
-                config=llm_config,
-                verbose=verbose,
-                show_prompt=show_prompt
-            )
-            
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", """你是一位专业的小说编辑，精通简体中文和小说创作。
-
-【你的任务】
-基于一致性检测报告，对一章已生成的小说进行**最小必要修订**，修复设定冲突、用词问题、逻辑错误等。
-
-【输入说明】
-1. original_chapter：原始章节的完整 JSON 结构
-   - chapter_number: 章节编号（整数）
-   - chapter_title: 章节标题（字符串）
-   - scenes: 场景列表，每个场景有：
-     - scene_number: 场景编号（整数）
-     - content: 场景正文（字符串）
-     - word_count: 字数统计（整数）
-   - total_words: 总字数（整数）
-
-2. revision_notes：修订说明文本
-   - 来自一致性检测报告，列出需要修复的问题及建议
-
-【输出要求】
-1. 必须输出符合 JSON schema 的结构化数据
-2. 必须包含 chapter_number（章节编号）字段，类型为整数
-3. 必须包含 chapter_title（章节标题）字段，类型为字符串
-4. 必须包含 scenes（场景列表）字段，类型为 GeneratedScene 对象数组
-5. 每个 GeneratedScene 对象必须包含：scene_number, content, word_count
-6. 必须包含 total_words（总字数）字段，类型为整数
-
-【修订约束】
-1. **保持结构不变**：
-   - chapter_number 和 chapter_title 必须与输入完全一致（除非明确要求修复标题错误）
-   - 尽量保留场景数量和顺序，只在绝对必要时增删场景
-   - 每个场景的 scene_number 应与原场景对应（若未增删场景）
-
-2. **最小必要修改**：
-   - 仅针对 revision_notes 中指出的问题进行修改
-   - 优先修改场景的 content 内容，而非重写整个场景
-   - 保持原文的语言风格和叙事视角
-   - 避免大面积改写与问题无关的段落
-
-3. **字数要求**：
-   - 修订后的 word_count 和 total_words 必须重新计算并反映实际字数
-   - 若非必要，尽量保持与原文字数接近
-
-【注意事项】
-- 如果 revision_notes 为空或没有明确的修复建议，保持原文不变
-- 对于不确定的修订，宁可保守处理，不要过度修改
-- 修订应保持与世界观、角色设定、前文剧情的一致性"""),
-                ("user", """【原始章节（JSON）】
-{original_chapter_json}
-
-【修订说明】
-{revision_notes}
-
-请根据以上修订说明，对原始章节进行最小必要修订。""")
-            ])
-            
-            chain = prompt | structured_llm
-            return chain
-            
-        except Exception as e:
-            print(f"⚠️  structured_output 模式初始化失败，退回传统解析路径: {e}")
-    
-    llm = get_llm(config=llm_config, verbose=verbose, show_prompt=show_prompt)
-    base_parser = PydanticOutputParser[GeneratedChapter](pydantic_object=GeneratedChapter)
-    parser = LLMJsonRepairOutputParser[GeneratedChapter](parser=base_parser, llm=llm)
-
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", """你是一位专业的小说编辑，精通简体中文和小说创作。
-
-【你的任务】
-基于一致性检测报告，对一章已生成的小说进行**最小必要修订**，修复设定冲突、用词问题、逻辑错误等。
-
-【输入说明】
-1. original_chapter：原始章节的完整 JSON 结构
-   - chapter_number: 章节编号（整数）
-   - chapter_title: 章节标题（字符串）
-   - scenes: 场景列表，每个场景有：
-     - scene_number: 场景编号（整数）
-     - content: 场景正文（字符串）
-     - word_count: 字数统计（整数）
-   - total_words: 总字数（整数）
-
-2. revision_notes：修订说明文本
-   - 来自一致性检测报告，列出需要修复的问题及建议
-
-【输出格式（JSON schema）】
-{format_instructions}
-
-【修订约束】
-1. **保持结构不变**：
-   - chapter_number 和 chapter_title 必须与输入完全一致（除非明确要求修复标题错误）
-   - 尽量保留场景数量和顺序，只在绝对必要时增删场景
-   - 每个场景的 scene_number 应与原场景对应（若未增删场景）
-
-2. **最小必要修改**：
-   - 仅针对 revision_notes 中指出的问题进行修改
-   - 优先修改场景的 content 内容，而非重写整个场景
-   - 保持原文的语言风格和叙事视角
-   - 避免大面积改写与问题无关的段落
-
-3. **字数要求**：
-   - 修订后的 word_count 和 total_words 必须重新计算并反映实际字数
-   - 若非必要，尽量保持与原文字数接近
-
-4. **输出格式**：
-   - 必须严格按 JSON 格式输出，不要用 Markdown 包裹
-   - scenes 列表中的 content 字段禁止包含未转义的英文双引号
-   - 如需引号，使用「」或转义的 \\"
-
-【注意事项】
-- 如果 revision_notes 为空或没有明确的修复建议，保持原文不变
-- 对于不确定的修订，宁可保守处理，不要过度修改
-- 修订应保持与世界观、角色设定、前文剧情的一致性"""),
-        ("user", """【原始章节（JSON）】
-{original_chapter_json}
-
-【修订说明】
-{revision_notes}
-
-请根据以上修订说明，对原始章节进行最小必要修订，并以完整的 GeneratedChapter JSON 格式输出。""")
+    # 合并原章节内容
+    original_content = "\n\n---\n\n".join([
+        f"【场景 {scene.scene_number}】\n{scene.content}"
+        for scene in original_chapter.scenes
     ])
+    
+    # 准备审查报告信息
+    if review_report:
+        overall_score = review_report.overall_score
+        review_summary = review_report.summary
+        issues_description = _format_issues_description(review_report.issues)
+    else:
+        overall_score = 80
+        review_summary = "无明显问题，轻微润色"
+        issues_description = "无明显问题"
+    
+    # 格式化参考信息
+    chapter_plan_info = _format_chapter_plan(chapter_plan)
+    world_and_characters_info = _format_world_and_characters(world_setting, characters)
+    
+    # 构建 prompt
+    prompt = ChatPromptTemplate.from_template(REVISION_PROMPT)
+    
+    # 获取 LLM
+    llm = get_llm(llm_config)
+    
+    # 调用 LLM
+    chain = prompt | llm
+    
+    result = chain.invoke({
+        "chapter_number": original_chapter.chapter_number,
+        "chapter_title": original_chapter.chapter_title,
+        "original_content": original_content,
+        "overall_score": overall_score,
+        "review_summary": review_summary,
+        "issues_description": issues_description,
+        "chapter_plan_info": chapter_plan_info,
+        "world_and_characters_info": world_and_characters_info
+    })
+    
+    # 解析结果
+    response_text = result.content if hasattr(result, 'content') else str(result)
+    
+    # 提取 JSON
+    import re
+    json_match = re.search(r'```(?:json)?\s*([\s\S]*?)```', response_text)
+    if json_match:
+        json_str = json_match.group(1).strip()
+    else:
+        # 尝试直接解析
+        json_str = response_text.strip()
+    
+    try:
+        chapter_data = json.loads(json_str)
+        
+        # 构建 GeneratedChapter
+        scenes = []
+        for scene_data in chapter_data.get("scenes", []):
+            scenes.append(GeneratedScene(
+                scene_number=scene_data.get("scene_number", 1),
+                content=scene_data.get("content", ""),
+                word_count=scene_data.get("word_count", len(scene_data.get("content", "")))
+            ))
+        
+        revised_chapter = GeneratedChapter(
+            chapter_number=chapter_data.get("chapter_number", original_chapter.chapter_number),
+            chapter_title=chapter_data.get("chapter_title", original_chapter.chapter_title),
+            scenes=scenes,
+            total_words=chapter_data.get("total_words", sum(s.word_count for s in scenes))
+        )
+        
+        return revised_chapter
+        
+    except json.JSONDecodeError as e:
+        if verbose:
+            print(f"⚠️ JSON 解析失败，尝试降级处理: {e}")
+        
+        # 降级：将整个响应作为单一场景
+        revised_chapter = GeneratedChapter(
+            chapter_number=original_chapter.chapter_number,
+            chapter_title=original_chapter.chapter_title,
+            scenes=[GeneratedScene(
+                scene_number=1,
+                content=response_text,
+                word_count=len(response_text)
+            )],
+            total_words=len(response_text)
+        )
+        
+        return revised_chapter
 
-    chain = prompt | llm | parser
 
-    return chain
+# ============================================================================
+# 兼容旧版：基于修订说明的修订函数
+# 用于一致性检测触发的修订流程
+# ============================================================================
+
+SIMPLE_REVISION_PROMPT = """你是一位专业的小说修订编辑。你的任务是根据修订说明，修订章节内容。
+
+## 原章节信息
+
+**章节编号**: {chapter_number}
+**章节标题**: {chapter_title}
+
+### 原章节内容
+
+{original_content}
+
+## 修订说明
+
+{revision_notes}
+
+---
+
+## 修订要求
+
+请根据以上修订说明，修订章节内容。修订时请注意：
+
+1. **保持叙事连贯性**：不要大幅改变故事走向，只修复具体问题
+2. **保持风格一致**：修订后的文字风格应与原文一致
+3. **针对性修复**：重点关注修订说明中指出的问题
+4. **保持字数**：修订后的章节字数应与原章节相近（±10%）
+
+请输出修订后的完整章节内容（以 JSON 格式）：
+
+```json
+{{
+    "chapter_number": {chapter_number},
+    "chapter_title": "章节标题",
+    "scenes": [
+        {{
+            "scene_number": 1,
+            "content": "场景内容...",
+            "word_count": 1000
+        }}
+    ],
+    "total_words": 3000
+}}
+```
+
+请直接输出 JSON，不要包含其他解释。
+"""
 
 
 def revise_chapter(
     original_chapter: GeneratedChapter,
     revision_notes: str,
     verbose: bool = False,
-    llm_config=None,
-    show_prompt: bool = True
+    show_prompt: bool = False,
+    llm_config: Optional[dict] = None
 ) -> GeneratedChapter:
-    """
-    修订章节（结构化输出版本）
+    """修订章节（兼容旧接口）
+    
+    基于修订说明修订章节内容，用于一致性检测触发的修订流程。
 
     Args:
-        original_chapter: 原始章节的 GeneratedChapter 对象
-        revision_notes: 修订说明文本
-        verbose: 是否显示详细日志
+        original_chapter: 原始章节
+        revision_notes: 修订说明
+        verbose: 是否输出详细信息
+        show_prompt: 是否显示 prompt
         llm_config: LLM 配置
-        show_prompt: verbose 模式下是否显示完整提示词
 
     Returns:
-        修订后的 GeneratedChapter 对象
+        修订后的章节
     """
-    chain = create_revision_chain(verbose=verbose, llm_config=llm_config, show_prompt=show_prompt)
-
-    # 将原始章节转为 JSON 字符串传入
-    original_chapter_json = original_chapter.model_dump_json(indent=2, ensure_ascii=False)
-
-    input_data = {
-        "original_chapter_json": original_chapter_json,
-        "revision_notes": revision_notes
-    }
+    # 合并原章节内容
+    original_content = "\n\n---\n\n".join([
+        f"【场景 {scene.scene_number}】\n{scene.content}"
+        for scene in original_chapter.scenes
+    ])
     
-    if llm_config is None or not llm_config.use_structured_output:
-        parser = PydanticOutputParser[GeneratedChapter](pydantic_object=GeneratedChapter)
-        input_data["format_instructions"] = parser.get_format_instructions()
-
-    result = chain.invoke(input_data)
-
-    return result
+    # 构建 prompt
+    prompt = ChatPromptTemplate.from_template(SIMPLE_REVISION_PROMPT)
+    
+    # 获取 LLM
+    llm = get_llm(llm_config)
+    
+    # 调用 LLM
+    chain = prompt | llm
+    
+    if show_prompt:
+        print(f"\n[章节修订] Prompt:\n{SIMPLE_REVISION_PROMPT[:500]}...\n")
+    
+    result = chain.invoke({
+        "chapter_number": original_chapter.chapter_number,
+        "chapter_title": original_chapter.chapter_title,
+        "original_content": original_content,
+        "revision_notes": revision_notes
+    })
+    
+    # 解析结果
+    response_text = result.content if hasattr(result, 'content') else str(result)
+    
+    # 提取 JSON
+    import re
+    json_match = re.search(r'```(?:json)?\s*([\s\S]*?)```', response_text)
+    if json_match:
+        json_str = json_match.group(1).strip()
+    else:
+        json_str = response_text.strip()
+    
+    try:
+        chapter_data = json.loads(json_str)
+        
+        scenes = []
+        for scene_data in chapter_data.get("scenes", []):
+            scenes.append(GeneratedScene(
+                scene_number=scene_data.get("scene_number", 1),
+                content=scene_data.get("content", ""),
+                word_count=scene_data.get("word_count", len(scene_data.get("content", "")))
+            ))
+        
+        revised_chapter = GeneratedChapter(
+            chapter_number=chapter_data.get("chapter_number", original_chapter.chapter_number),
+            chapter_title=chapter_data.get("chapter_title", original_chapter.chapter_title),
+            scenes=scenes,
+            total_words=chapter_data.get("total_words", sum(s.word_count for s in scenes))
+        )
+        
+        return revised_chapter
+        
+    except json.JSONDecodeError as e:
+        if verbose:
+            print(f"⚠️ JSON 解析失败，尝试降级处理: {e}")
+        
+        revised_chapter = GeneratedChapter(
+            chapter_number=original_chapter.chapter_number,
+            chapter_title=original_chapter.chapter_title,
+            scenes=[GeneratedScene(
+                scene_number=1,
+                content=response_text,
+                word_count=len(response_text)
+            )],
+            total_words=len(response_text)
+        )
+        
+        return revised_chapter

@@ -2,6 +2,7 @@
 NovelGen CLI 工具
 统一的命令行接口，用于管理小说生成流程
 
+作者: jamesenh, 2025-12-17
 开发者: Jamesenh
 开发时间: 2025-11-29
 更新: 2025-11-29 - 添加 SIGINT 信号处理，支持 Ctrl+C 优雅退出
@@ -1487,6 +1488,432 @@ def rollback(
         raise typer.Exit(1)
 
 
+# ==================== Chat 命令 ====================
+
+
+@app.command()
+def chat(
+    project_name: Annotated[str, typer.Argument(help="项目名称")],
+):
+    """
+    启动对话式 AI 助手
+    
+    通过自然语言与 AI 助手交互，完成小说生成、查询、回滚等操作。
+    支持斜杠命令直接执行，也支持自然语言描述意图。
+    
+    示例:
+      ng chat demo_001
+    """
+    project_dir = get_project_dir(project_name)
+    
+    # 检查项目目录是否存在
+    if not os.path.exists(project_dir):
+        rprint(f"[red]❌ 项目 '{project_name}' 不存在[/red]")
+        rprint(f"[dim]请先运行 'ng init {project_name}' 创建项目[/dim]")
+        raise typer.Exit(1)
+    
+    # 重置中断状态
+    _reset_interrupt_state()
+    
+    # 启动对话会话
+    from novelgen.agent.chat import start_chat_session
+    
+    try:
+        start_chat_session(project_name)
+    except KeyboardInterrupt:
+        rprint("\n[dim]对话已结束[/dim]")
+    except Exception as e:
+        rprint(f"\n[red]❌ 对话出错: {e}[/red]")
+        raise typer.Exit(1)
+
+
+# ==================== Graph 命令组 ====================
+
+# 创建 graph 子命令组
+graph_app = typer.Typer(
+    name="graph",
+    help="知识图谱管理命令",
+    add_completion=False
+)
+app.add_typer(graph_app, name="graph")
+
+
+@graph_app.command("rebuild")
+def graph_rebuild_cmd(
+    project_name: Annotated[str, typer.Argument(help="项目名称")],
+):
+    """
+    从 JSON 文件重建知识图谱
+    
+    从 characters.json 和 chapter_memory.json 全量重建 Kùzu 图谱。
+    这是一个幂等操作，会清除现有数据后重新导入。
+    
+    示例:
+      ng graph rebuild demo_001
+    """
+    project_dir = get_project_dir(project_name)
+    
+    # 检查项目目录是否存在
+    if not os.path.exists(project_dir):
+        rprint(f"[red]❌ 项目 '{project_name}' 不存在[/red]")
+        raise typer.Exit(1)
+    
+    rprint(f"\n[bold cyan]🔄 重建知识图谱: {project_name}[/bold cyan]\n")
+    
+    from novelgen.graph.updater import create_graph_updater
+    
+    updater = create_graph_updater(project_dir)
+    
+    if updater is None:
+        rprint("[yellow]⚠️ Kùzu 图谱功能不可用[/yellow]")
+        rprint("[dim]请确保已安装 kuzu: pip install kuzu[/dim]")
+        rprint("[dim]或检查 NOVELGEN_GRAPH_ENABLED 环境变量是否启用[/dim]")
+        raise typer.Exit(1)
+    
+    try:
+        with console.status("[bold green]正在重建图谱...[/bold green]"):
+            result = updater.rebuild_all()
+        
+        if result["success"]:
+            rprint(f"\n[green]✅ 图谱重建完成[/green]\n")
+            
+            # 创建统计表格
+            table = Table(show_header=True, header_style="bold")
+            table.add_column("项目", width=15)
+            table.add_column("数量", justify="right", width=10)
+            
+            table.add_row("角色", str(result["characters_imported"]))
+            table.add_row("关系", str(result["relations_imported"]))
+            table.add_row("章节", str(result["chapters_imported"]))
+            table.add_row("事件", str(result["events_imported"]))
+            
+            console.print(table)
+            
+            if result["errors"]:
+                rprint(f"\n[yellow]⚠️ 警告: {len(result['errors'])} 个错误[/yellow]")
+                for err in result["errors"][:5]:
+                    rprint(f"  - {err}")
+        else:
+            rprint(f"\n[red]❌ 图谱重建失败[/red]")
+            for err in result["errors"]:
+                rprint(f"  - {err}")
+            raise typer.Exit(1)
+        
+    except Exception as e:
+        rprint(f"\n[red]❌ 重建失败: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@graph_app.command("whois")
+def graph_whois_cmd(
+    project_name: Annotated[str, typer.Argument(help="项目名称")],
+    name: Annotated[str, typer.Argument(help="角色名称")],
+):
+    """
+    查询角色信息
+    
+    显示角色的详细信息，包括背景、性格、能力等。
+    
+    示例:
+      ng graph whois demo_001 林风
+    """
+    project_dir = get_project_dir(project_name)
+    
+    if not os.path.exists(project_dir):
+        rprint(f"[red]❌ 项目 '{project_name}' 不存在[/red]")
+        raise typer.Exit(1)
+    
+    from novelgen.config import ProjectConfig
+    from novelgen.graph.kuzu_store import KuzuStore
+    
+    config = ProjectConfig(project_dir=project_dir)
+    
+    if not config.graph_enabled:
+        rprint("[yellow]⚠️ 图谱功能已禁用[/yellow]")
+        raise typer.Exit(1)
+    
+    store = KuzuStore(config.get_graph_dir(), read_only=True)
+    
+    if not store.is_available:
+        rprint("[yellow]⚠️ Kùzu 不可用，请安装: pip install kuzu[/yellow]")
+        raise typer.Exit(1)
+    
+    if not store.connect():
+        rprint("[red]❌ 无法连接到图谱数据库[/red]")
+        rprint(f"[dim]请先运行: ng graph rebuild {project_name}[/dim]")
+        raise typer.Exit(1)
+    
+    try:
+        char = store.get_character(name)
+        
+        if char is None:
+            rprint(f"[yellow]⚠️ 未找到角色: {name}[/yellow]")
+            
+            # 显示可用角色列表
+            all_chars = store.get_all_characters()
+            if all_chars:
+                rprint("\n[bold]可用角色:[/bold]")
+                for c in all_chars:
+                    rprint(f"  - {c['name']} ({c['role']})")
+            raise typer.Exit(1)
+        
+        # 显示角色信息
+        rprint(f"\n[bold cyan]👤 {char['name']}[/bold cyan]\n")
+        
+        rprint(f"[bold]角色定位:[/bold] {char.get('role', '-')}")
+        rprint(f"[bold]性别:[/bold] {char.get('gender', '-')}")
+        if char.get('age'):
+            rprint(f"[bold]年龄:[/bold] {char['age']}")
+        
+        if char.get('appearance'):
+            rprint(f"\n[bold]外貌:[/bold]\n{char['appearance']}")
+        
+        if char.get('personality'):
+            rprint(f"\n[bold]性格:[/bold]\n{char['personality']}")
+        
+        if char.get('background'):
+            rprint(f"\n[bold]背景:[/bold]\n{char['background']}")
+        
+        if char.get('motivation'):
+            rprint(f"\n[bold]动机:[/bold]\n{char['motivation']}")
+        
+        if char.get('abilities'):
+            rprint(f"\n[bold]能力:[/bold]")
+            for ability in char['abilities']:
+                rprint(f"  - {ability}")
+        
+    finally:
+        store.close()
+
+
+@graph_app.command("relations")
+def graph_relations_cmd(
+    project_name: Annotated[str, typer.Argument(help="项目名称")],
+    name: Annotated[str, typer.Argument(help="角色名称")],
+    with_name: Annotated[Optional[str], typer.Option("--with", "-w", help="查询与指定角色的关系")] = None,
+):
+    """
+    查询角色关系
+    
+    显示角色与其他角色的关系，包括关系类型、描述和证据引用。
+    使用 --with 选项可以查询两个特定角色之间的直接关系。
+    
+    示例:
+      ng graph relations demo_001 林风
+      ng graph relations demo_001 林风 --with 雷震
+    """
+    project_dir = get_project_dir(project_name)
+    
+    if not os.path.exists(project_dir):
+        rprint(f"[red]❌ 项目 '{project_name}' 不存在[/red]")
+        raise typer.Exit(1)
+    
+    from novelgen.config import ProjectConfig
+    from novelgen.graph.kuzu_store import KuzuStore
+    
+    config = ProjectConfig(project_dir=project_dir)
+    
+    if not config.graph_enabled:
+        rprint("[yellow]⚠️ 图谱功能已禁用[/yellow]")
+        raise typer.Exit(1)
+    
+    store = KuzuStore(config.get_graph_dir(), read_only=True)
+    
+    if not store.is_available:
+        rprint("[yellow]⚠️ Kùzu 不可用，请安装: pip install kuzu[/yellow]")
+        raise typer.Exit(1)
+    
+    if not store.connect():
+        rprint("[red]❌ 无法连接到图谱数据库[/red]")
+        rprint(f"[dim]请先运行: ng graph rebuild {project_name}[/dim]")
+        raise typer.Exit(1)
+    
+    try:
+        relations = store.get_relations(name, with_name)
+        
+        if with_name:
+            rprint(f"\n[bold cyan]🔗 {name} ↔ {with_name} 的关系[/bold cyan]\n")
+        else:
+            rprint(f"\n[bold cyan]🔗 {name} 的关系[/bold cyan]\n")
+        
+        if not relations:
+            if with_name:
+                rprint(f"[dim]未找到 {name} 与 {with_name} 之间的直接关系[/dim]")
+            else:
+                rprint(f"[dim]未找到 {name} 的任何关系[/dim]")
+            return
+        
+        # 创建关系表格
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("角色", width=12)
+        table.add_column("关系类型", width=12)
+        table.add_column("描述", width=40, no_wrap=False)
+        table.add_column("证据", width=15)
+        
+        for rel in relations:
+            # 确定另一个角色
+            other = rel["to_name"] if rel["from_name"] == name else rel["from_name"]
+            
+            # 证据引用
+            evidence = rel.get("evidence_ref", {})
+            if evidence:
+                evidence_str = evidence.get("source", "-")
+            else:
+                evidence_str = "-"
+            
+            table.add_row(
+                other,
+                rel.get("relation_type", "-"),
+                rel.get("description", "-")[:38] + "..." if len(rel.get("description", "")) > 38 else rel.get("description", "-"),
+                evidence_str
+            )
+        
+        console.print(table)
+        
+    finally:
+        store.close()
+
+
+@graph_app.command("events")
+def graph_events_cmd(
+    project_name: Annotated[str, typer.Argument(help="项目名称")],
+    name: Annotated[Optional[str], typer.Argument(help="角色名称（可选）")] = None,
+    chapter: Annotated[Optional[int], typer.Option("--chapter", "-c", help="按章节过滤")] = None,
+):
+    """
+    查询事件信息
+    
+    显示角色参与的事件或特定章节的事件，包括事件描述和证据引用。
+    
+    示例:
+      ng graph events demo_001 林风
+      ng graph events demo_001 --chapter 3
+      ng graph events demo_001 林风 --chapter 2
+    """
+    project_dir = get_project_dir(project_name)
+    
+    if not os.path.exists(project_dir):
+        rprint(f"[red]❌ 项目 '{project_name}' 不存在[/red]")
+        raise typer.Exit(1)
+    
+    from novelgen.config import ProjectConfig
+    from novelgen.graph.kuzu_store import KuzuStore
+    
+    config = ProjectConfig(project_dir=project_dir)
+    
+    if not config.graph_enabled:
+        rprint("[yellow]⚠️ 图谱功能已禁用[/yellow]")
+        raise typer.Exit(1)
+    
+    store = KuzuStore(config.get_graph_dir(), read_only=True)
+    
+    if not store.is_available:
+        rprint("[yellow]⚠️ Kùzu 不可用，请安装: pip install kuzu[/yellow]")
+        raise typer.Exit(1)
+    
+    if not store.connect():
+        rprint("[red]❌ 无法连接到图谱数据库[/red]")
+        rprint(f"[dim]请先运行: ng graph rebuild {project_name}[/dim]")
+        raise typer.Exit(1)
+    
+    try:
+        events = store.get_events(character_name=name, chapter_number=chapter)
+        
+        # 构建标题
+        title_parts = ["📅 事件列表"]
+        if name:
+            title_parts.append(f"[{name}]")
+        if chapter:
+            title_parts.append(f"[第{chapter}章]")
+        
+        rprint(f"\n[bold cyan]{' '.join(title_parts)}[/bold cyan]\n")
+        
+        if not events:
+            rprint("[dim]未找到符合条件的事件[/dim]")
+            return
+        
+        # 按章节分组显示
+        current_chapter = None
+        for event in events:
+            ch_num = event.get("chapter_number")
+            if ch_num != current_chapter:
+                current_chapter = ch_num
+                rprint(f"\n[bold]第 {ch_num} 章[/bold]")
+            
+            event_id = event.get("event_id", "-")
+            desc = event.get("description", "-")
+            evidence = event.get("evidence_ref", {})
+            
+            rprint(f"  [{event_id}] {desc}")
+            
+            if evidence and evidence.get("source"):
+                rprint(f"    [dim]来源: {evidence.get('source')}[/dim]")
+        
+    finally:
+        store.close()
+
+
+@graph_app.command("stats")
+def graph_stats_cmd(
+    project_name: Annotated[str, typer.Argument(help="项目名称")],
+):
+    """
+    显示图谱统计信息
+    
+    显示图谱中的节点和关系数量。
+    
+    示例:
+      ng graph stats demo_001
+    """
+    project_dir = get_project_dir(project_name)
+    
+    if not os.path.exists(project_dir):
+        rprint(f"[red]❌ 项目 '{project_name}' 不存在[/red]")
+        raise typer.Exit(1)
+    
+    from novelgen.config import ProjectConfig
+    from novelgen.graph.kuzu_store import KuzuStore
+    
+    config = ProjectConfig(project_dir=project_dir)
+    
+    if not config.graph_enabled:
+        rprint("[yellow]⚠️ 图谱功能已禁用[/yellow]")
+        raise typer.Exit(1)
+    
+    store = KuzuStore(config.get_graph_dir(), read_only=True)
+    
+    if not store.is_available:
+        rprint("[yellow]⚠️ Kùzu 不可用，请安装: pip install kuzu[/yellow]")
+        raise typer.Exit(1)
+    
+    if not store.connect():
+        rprint("[red]❌ 无法连接到图谱数据库[/red]")
+        rprint(f"[dim]请先运行: ng graph rebuild {project_name}[/dim]")
+        raise typer.Exit(1)
+    
+    try:
+        stats = store.get_stats()
+        
+        rprint(f"\n[bold cyan]📊 图谱统计: {project_name}[/bold cyan]\n")
+        
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("类型", width=20)
+        table.add_column("数量", justify="right", width=10)
+        
+        table.add_row("角色节点", str(stats.get("characters", 0)))
+        table.add_row("章节节点", str(stats.get("chapters", 0)))
+        table.add_row("事件节点", str(stats.get("events", 0)))
+        table.add_row("角色关系", str(stats.get("relations", 0)))
+        table.add_row("参与关系", str(stats.get("participates", 0)))
+        
+        console.print(table)
+        
+        rprint(f"\n[dim]图谱目录: {config.get_graph_dir()}[/dim]")
+        
+    finally:
+        store.close()
+
+
 @app.callback()
 def main():
     """
@@ -1500,4 +1927,3 @@ def main():
 
 if __name__ == "__main__":
     app()
-

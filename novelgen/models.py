@@ -2,6 +2,7 @@
 数据模型定义
 所有业务相关的数据结构都定义在此文件中
 
+作者: jamesenh, 2025-12-17
 更新: 2025-11-28 - 添加动态章节数量支持（StoryProgressEvaluation, Settings/Outline 字段变更）
 """
 from typing import List, Optional, Dict, Any, Literal
@@ -290,6 +291,60 @@ class RevisionStatus(BaseModel):
     revised_chapter: Optional[GeneratedChapter] = Field(default=None, description="修订候选的完整章节结构")
     created_at: str = Field(description="创建时间")
     decision_at: Optional[str] = Field(default=None, description="确认时间")
+    # 逻辑审查触发标记（区分一致性检测触发 vs 逻辑审查触发）
+    triggered_by: str = Field(default="consistency", description="触发来源: consistency/logic_review")
+
+
+class LogicReviewIssue(BaseModel):
+    """逻辑审查问题
+    
+    用于描述章节中发现的逻辑问题（因果链断裂、动机不合理、衔接突兀等）
+    
+    开发者: jamesenh, 开发时间: 2025-12-16
+    """
+    issue_type: str = Field(description="问题类型（因果断裂/动机不合理/衔接突兀/世界规则违反/节奏失衡等）")
+    description: str = Field(description="问题描述")
+    severity: str = Field(default="medium", description="严重程度: low/medium/high")
+    evidence: Optional[str] = Field(default=None, description="问题依据（引用章节中的具体内容）")
+    fix_instructions: Optional[str] = Field(default=None, description="修复建议")
+
+
+class LogicReviewReport(BaseModel):
+    """逻辑审查报告
+    
+    章节逻辑审查的结构化输出，包含评分、问题列表和修复指引
+    
+    开发者: jamesenh, 开发时间: 2025-12-16
+    """
+    chapter_number: int = Field(description="章节编号")
+    overall_score: int = Field(description="整体评分（0-100）")
+    issues: List[LogicReviewIssue] = Field(default_factory=list, description="发现的问题列表")
+    summary: str = Field(description="审查摘要/结论")
+    
+    def should_block(self, min_score: int = 75) -> bool:
+        """判断是否应触发阻断
+        
+        阻断条件：
+        1. overall_score < min_score
+        2. 存在 severity == "high" 的问题
+        
+        Args:
+            min_score: 评分阈值（默认 75）
+            
+        Returns:
+            是否应触发阻断
+        """
+        if self.overall_score < min_score:
+            return True
+        for issue in self.issues:
+            if issue.severity == "high":
+                return True
+        return False
+    
+    @property
+    def high_issues_count(self) -> int:
+        """高严重性问题数量"""
+        return sum(1 for issue in self.issues if issue.severity == "high")
 
 
 # 持久化相关数据模型

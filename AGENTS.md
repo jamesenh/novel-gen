@@ -18,18 +18,17 @@ Keep this managed block so 'openspec update' can refresh the instructions.
 
 # NovelGen Project Guide
 
-## Project Overview
+该文件用于指导 AI 助手在本仓库内高效、安全、与现状一致地工作（**保持上方 OpenSpec managed block 不变**）。
 
-NovelGen is a sophisticated **Chinese AI novel generation system** built on LangChain and LangGraph. It automates the complete novel creation process through 6 structured steps: world-building → characters → themes → outline → chapter planning → scene generation. The project serves both as a practical tool for automated novel creation and as a learning platform for advanced LangChain architecture patterns.
+## 文档入口（先读这些）
 
-**Key Capabilities:**
-- Complete end-to-end novel generation workflow
-- Structured JSON-based data exchange between steps using Pydantic models
-- LangGraph-based stateful workflow orchestration
-- Optional Mem0 intelligent memory layer for user preferences and entity state management
-- Vector storage with ChromaDB for semantic search and context retrieval
-- Consistency checking and revision systems
-- Checkpoint and resume functionality
+- 文档索引：`docs/README.md`
+- 快速开始：`docs/QUICKSTART.md`
+- 环境变量配置：`docs/ENV_SETUP.md`
+- 目录与落盘约定：`docs/STRUCTURE.md`
+- 生成流程全解（以代码为准）：`docs/小说生成完整流程说明.md`
+- 对话式 Agent：`docs/对话式Agent使用指南.md`
+- Kùzu 知识图谱：`docs/知识图谱使用指南.md`
 
 ## Technology Stack
 
@@ -41,6 +40,8 @@ NovelGen is a sophisticated **Chinese AI novel generation system** built on Lang
 - **ChromaDB** for vector storage and semantic search
 - **Mem0** for intelligent memory management (optional)
 - **uv** for modern Python package management
+- **Typer + Rich** for CLI and UX
+- **Kùzu** for embedded knowledge graph (optional)
 
 **Development Tools:**
 - **pytest** for testing framework
@@ -51,47 +52,60 @@ NovelGen is a sophisticated **Chinese AI novel generation system** built on Lang
 
 ```
 novelgen/
-├── novelgen/                 # Main package
-│   ├── config.py            # Configuration management
-│   ├── models.py            # Pydantic data models
-│   ├── llm.py               # LLM instance management
-│   ├── chains/              # LangChain generation chains
-│   │   ├── world_chain.py
-│   │   ├── characters_chain.py
-│   │   ├── outline_chain.py
-│   │   ├── scene_text_chain.py
-│   │   └── ...
-│   └── runtime/             # Runtime orchestration
-│       ├── workflow.py      # LangGraph workflow definition
-│       ├── nodes.py         # LangGraph node implementations
-│       ├── memory.py        # Memory management
-│       ├── consistency.py   # Consistency checking
-│       └── revision.py      # Chapter revision system
-├── projects/                # Generated novel projects
-├── tests/                   # Test suite
-├── openspec/               # OpenSpec configuration
-├── docs/                   # Documentation
-└── examples/               # Usage examples
+├── novelgen/                 # 主包
+│   ├── cli.py                # ng 命令入口（Typer）
+│   ├── config.py             # 项目配置/环境变量
+│   ├── models.py             # Pydantic 模型
+│   ├── llm.py                # LLM 初始化与统一配置
+│   ├── chains/               # 各阶段生成链（结构化输出）
+│   ├── runtime/              # LangGraph 工作流/节点/编排器
+│   ├── agent/                # 对话式 Agent（ng chat）
+│   ├── tools/                # Agent 工具（workflow/graph/memory/preference）
+│   └── graph/                # Kùzu 图谱（可选）
+├── projects/                 # 每个项目一套生成真源（JSON）
+├── tests/                    # 测试
+├── scripts/                  # 运维/维护脚本（Mem0/向量/查看等）
+├── openspec/                 # OpenSpec 配置/变更
+└── docs/                     # 文档
 ```
 
-## Development Workflow
+## 运行入口（以 CLI 为准）
 
-### Novel Generation Pipeline
-1. **World Creation** - Generate detailed world setting from user description
-2. **Theme & Conflict** - Define core themes and conflicts
-3. **Character Generation** - Create protagonist, antagonist, and supporting characters
-4. **Outline Creation** - Generate story structure with chapter summaries
-5. **Chapter Planning** - Detailed scene-by-scene planning for each chapter
-6. **Scene Text Generation** - Generate actual novel text scene by scene
-7. **Consistency Checking** - Verify internal consistency and fix issues
-8. **Revision System** - Apply revisions based on consistency reports
+项目脚本入口在 `pyproject.toml` 的 `[project.scripts]`：`ng = "novelgen.cli:app"`。
 
-### Key Design Principles
-- **Chain Independence**: Each generation step runs independently with JSON file communication
-- **Structured Outputs**: All data validated through Pydantic models
-- **Configuration-Driven**: Environment variables and config files for flexible deployment
-- **Memory Persistence**: SQLite for structured data, ChromaDB for vectors
-- **Error Recovery**: LLMJsonRepairOutputParser for automatic JSON format fixes
+常用命令（示例）：
+
+```bash
+ng init demo_001
+ng run demo_001
+ng resume demo_001
+ng status demo_001
+ng state demo_001
+ng export demo_001
+ng rollback demo_001 --chapter 3
+ng chat demo_001
+ng graph rebuild demo_001
+```
+
+世界观/主题冲突候选（可选但推荐）：
+
+```bash
+ng world-variants demo_001 --prompt "修仙世界" --expand
+ng world-select demo_001 variant_1
+ng theme-variants demo_001 --direction "复仇"
+ng theme-select demo_001 variant_1
+```
+
+## 数据与落盘约定（关键）
+
+- **JSON 为真源**：`projects/<project_id>/` 下的 `world.json / characters.json / outline.json / chapters/...` 等文件是“事实来源”
+- **可选层可降级**：Mem0（向量/偏好/状态）与 Kùzu 图谱均应做到“不可用则静默跳过，不阻断主流程”
+- **断点续跑**：LangGraph checkpoint 默认在 `projects/<project_id>/workflow_checkpoints.db`
+
+## 对话式 Agent（ng chat）
+
+- 代码：`novelgen/agent/chat.py` + `novelgen/tools/*`
+- 斜杠命令与确认策略：参考 `docs/对话式Agent使用指南.md`
 
 ### Code Style Guidelines
 
@@ -124,26 +138,23 @@ uv sync
 pip install -r requirements.txt
 ```
 
-### Configuration
-```bash
-# Copy environment template
-cp .env.template .env
+### Configuration（.env）
 
-# Edit .env with your OpenAI API key
-```
+见：`docs/ENV_SETUP.md`（从 `.env.template` 拷贝为 `.env`）
 
 ### Running Novel Generation
 ```bash
-# Full workflow using main.py
-python main.py
+# 初始化项目并生成
+ng init demo_001
+ng run demo_001
 
-# Using orchestrator directly
-python -m novelgen.runtime.orchestrator \
-  --project projects/demo_001 \
-  --steps world,characters,outline,chapters_plan,chapters
+# 断点恢复
+ng resume demo_001
 
-# Export novel to text
-python main.py export_novel_cmd demo_001
+# 状态/导出/回滚
+ng status demo_001
+ng export demo_001
+ng rollback demo_001 --chapter 3
 ```
 
 ### Testing
@@ -160,14 +171,15 @@ pytest -v
 
 ### Memory Management
 ```bash
-# Check memory health
-python scripts/memory_health_check.py
+# Mem0 健康检查
+python scripts/check_mem0_health.py
 
-# Reindex vectors
-python scripts/vector_reindex.py
+# 向量重建
+python scripts/reindex_vectors.py
 
-# Export memory data
-python scripts/export_memory.py
+# Mem0 导出/清理
+python scripts/export_mem0_to_json.py
+python scripts/clear_mem0_memory.py
 ```
 
 ## Configuration Options

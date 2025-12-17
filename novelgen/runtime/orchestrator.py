@@ -1,32 +1,31 @@
-# 开发者: jamesenh, 开发时间: 2025-11-17
-# 更新: 2025-11-25 - 简化记忆层架构，移除 SQLite 和独立 VectorStore，统一使用 Mem0
-# 更新: 2025-11-30 - 添加 cleanup 方法和退出调试日志
-
 """
 编排器
 协调整个小说生成流程，使用 Mem0 作为唯一的记忆存储层
+
+作者: jamesenh, 2025-12-17
+开发者: jamesenh, 开发时间: 2025-11-17
+更新: 2025-11-25 - 简化记忆层架构，移除 SQLite 和独立 VectorStore，统一使用 Mem0
+更新: 2025-11-30 - 添加 cleanup 方法和退出调试日志
 """
 import os
 import json
 import time
 import threading
+from datetime import datetime
 from typing import Optional, List, Dict, Any
-
-# 调试模式开关
-DEBUG_EXIT = os.getenv("NOVELGEN_DEBUG", "0") == "1"
-
-
-def _debug_log(msg: str):
-    """输出调试日志（仅在 DEBUG_EXIT=True 时）"""
-    if DEBUG_EXIT:
-        timestamp = time.strftime("%H:%M:%S")
-        thread_name = threading.current_thread().name
-        print(f"[{timestamp}][{thread_name}] 🔍 [orchestrator] {msg}")
 
 from novelgen.models import (
     WorldSetting, ThemeConflict, CharactersConfig,
     Outline, ChapterPlan, GeneratedChapter, GeneratedScene,
-    ChapterSummary, ChapterMemoryEntry, ConsistencyReport, RevisionStatus
+    ChapterSummary, ChapterMemoryEntry, ConsistencyReport, RevisionStatus,
+    LogicReviewReport
+)
+from novelgen.runtime.gate import (
+    check_pending_revision_gate_for_range,
+    find_pending_revisions,
+    get_blocked_chapter,
+    format_gate_error_for_user,
+    PendingRevisionGateError
 )
 from novelgen.config import ProjectConfig
 from novelgen.runtime.exporter import export_chapter_to_txt, export_all_chapters_to_txt
@@ -38,7 +37,18 @@ from novelgen.runtime.workflow import (
 )
 from novelgen.runtime.mem0_manager import Mem0Manager, is_shutdown_requested
 from novelgen.models import NovelGenerationState
-from datetime import datetime
+
+
+# 调试模式开关
+DEBUG_EXIT = os.getenv("NOVELGEN_DEBUG", "0") == "1"
+
+
+def _debug_log(msg: str):
+    """输出调试日志（仅在 DEBUG_EXIT=True 时）"""
+    if DEBUG_EXIT:
+        timestamp = time.strftime("%H:%M:%S")
+        thread_name = threading.current_thread().name
+        print(f"[{timestamp}][{thread_name}] 🔍 [orchestrator] {msg}")
 
 
 class NovelOrchestrator:
@@ -150,12 +160,46 @@ class NovelOrchestrator:
         self.save_json(serializable, self.config.chapter_memory_file)
 
     def _append_chapter_memory_entry(self, entry: ChapterMemoryEntry):
-        """追加或替换某章节的记忆记录"""
+        """追加或替换某章节的记忆记录，并触发图谱更新"""
         entries = self._load_chapter_memory_entries()
         entries = [e for e in entries if e.chapter_number != entry.chapter_number]
         entries.append(entry)
         entries.sort(key=lambda e: e.chapter_number)
         self._save_chapter_memory_entries(entries)
+        
+        # 触发图谱更新
+        self._update_graph_after_chapter_memory(entry)
+
+    def _update_graph_after_chapter_memory(self, entry: ChapterMemoryEntry):
+        """
+        章节记忆写入成功后，增量更新 Kùzu 图谱
+        
+        失败时仅记录警告，不阻断主流程。
+        
+        Args:
+            entry: 章节记忆条目
+        """
+        try:
+            from novelgen.graph.updater import create_graph_updater
+            
+            updater = create_graph_updater(self.config.project_dir)
+            if updater is None:
+                # 图谱功能未启用或不可用，静默跳过
+                return
+            
+            result = updater.update_chapter(entry)
+            
+            if result["success"]:
+                if result["events_added"] > 0:
+                    print(f"📊 图谱已更新: 第{entry.chapter_number}章 (+{result['events_added']} 事件)")
+            else:
+                # 记录警告但不阻断
+                for error in result.get("errors", []):
+                    print(f"⚠️ 图谱更新警告: {error}")
+                    
+        except Exception as e:
+            # 捕获所有异常，确保不阻断主流程
+            print(f"⚠️ 图谱更新失败（不影响生成）: {e}")
 
     def _get_recent_chapter_memory(self, chapter_number: int, limit: Optional[int] = None) -> List[ChapterMemoryEntry]:
         """
@@ -467,8 +511,28 @@ class NovelOrchestrator:
         
         Returns:
             最终的工作流状态
+            
+        Raises:
+            PendingRevisionGateError: 如果存在 pending revision 阻断后续生成
         """
         print("🚀 开始运行 LangGraph 工作流...")
+        
+        # 检查 pending revision 闸门
+        # 开发者: jamesenh, 开发时间: 2025-12-16
+        pending_list = find_pending_revisions(self.project_dir)
+        if pending_list:
+            blocked_chapter = pending_list[0].chapter_number
+            print(format_gate_error_for_user(PendingRevisionGateError(
+                blocked_chapter=blocked_chapter,
+                target_chapter=blocked_chapter + 1,
+                pending_info=pending_list[0]
+            )))
+            raise PendingRevisionGateError(
+                blocked_chapter=blocked_chapter,
+                target_chapter=blocked_chapter + 1,
+                pending_info=pending_list[0],
+                message=f"无法继续运行：第 {blocked_chapter} 章存在 pending 修订，请先处理后再运行"
+            )
         
         # 获取初始状态
         initial_state = self._get_or_create_workflow_state()
@@ -516,14 +580,35 @@ class NovelOrchestrator:
         """从检查点恢复工作流
         
         修复: 2025-11-30 - 在恢复前同步文件系统状态，确保场景文件能正确合并为章节
+        更新: 2025-12-16 - 添加 pending revision 闸门检查
         
         Args:
             checkpoint_id: 检查点 ID（可选，默认使用最新检查点）
         
         Returns:
             恢复后的工作流状态
+            
+        Raises:
+            PendingRevisionGateError: 如果存在 pending revision 阻断后续生成
         """
         print(f"🔄 从检查点恢复工作流...")
+        
+        # 检查 pending revision 闸门
+        # 开发者: jamesenh, 开发时间: 2025-12-16
+        pending_list = find_pending_revisions(self.project_dir)
+        if pending_list:
+            blocked_chapter = pending_list[0].chapter_number
+            print(format_gate_error_for_user(PendingRevisionGateError(
+                blocked_chapter=blocked_chapter,
+                target_chapter=blocked_chapter + 1,
+                pending_info=pending_list[0]
+            )))
+            raise PendingRevisionGateError(
+                blocked_chapter=blocked_chapter,
+                target_chapter=blocked_chapter + 1,
+                pending_info=pending_list[0],
+                message=f"无法恢复运行：第 {blocked_chapter} 章存在 pending 修订，请先处理后再运行"
+            )
         
         # 关键修复：先检查并合并未完成的章节（从场景文件）
         # 这处理了场景都生成了但章节文件未保存的情况
