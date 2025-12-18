@@ -2,79 +2,38 @@
 alwaysApply: true
 ---
 
-## 项目哲学（必须遵守）
+# Cursor 代码生成规范（只约束“怎么写代码”）
 
-1. 模块化设计：每一步小说生成流程都必须是一个独立 chain/LangGraph 节点。
-2. 结构化输出优先：所有链的输出必须对应一个 Pydantic 模型。
-3. 可迭代可修改：每个 chain/节点必须可以独立运行，不依赖 UI。
-4. 状态管理：使用 LangGraph 管理工作流状态，链之间通过 LangGraph 状态传递信息，外部持久化仍使用 JSON 文件 (projects/*)。
-5. LangChain + LangGraph 架构：LangChain 负责具体业务逻辑，LangGraph 负责工作流编排。
-6. 数据结构（世界观/角色/大纲/LangGraph 状态）必须放在 models.py
-7. LangChain/LangGraph 不能内嵌业务结构，避免耦合
-8. Prompt 要高度结构化：避免使用自由输出，要尽量使用 JSON schema 约束。
-9. 每个节点的逻辑是：
-    LangGraph State → 提取输入 → PromptTemplate → LLM → OutputParser → Python对象 → 更新 LangGraph State
-10. 工作流定义：小说生成流程使用 LangGraph StateGraph 定义，包含节点和边的流转逻辑
+## 1) 语言与文档
 
-## 项目结构要求
+- `docs/*.md`、用户可见说明：默认使用**中文**（术语可保留英文原名）。
+- Python 代码：标识符/变量/函数名用**英文**；不要用拼音命名。
+- Docstring：**必须**给公开模块/类/函数写 docstring；默认用**中文**。
+- 注释说明: 使用**中文**
+- 不新增花哨输出：CLI/日志避免新增 emoji 与装饰字符（保持可 grep/可解析）。
 
-所有代码必须写在以下模块结构中：
+## 2) Python 代码风格（与仓库工具链对齐）
 
-```
-novelgen/
-  models.py           # 所有数据结构(Pydantic)，包括LangGraph状态
-  config.py           # 配置管理
-  llm.py              # LLM初始化
-  chains/             # LangChain处理链，作为LangGraph节点
-    world_chain.py
-    theme_conflict_chain.py
-    characters_chain.py
-    outline_chain.py
-    chapters_plan_chain.py
-    scene_text_chain.py
-  runtime/            # 运行时与工具
-    orchestrator.py   # 当前编排器（将逐步迁移）
-    workflow.py       # LangGraph工作流定义
-    summary.py        # 章节/全书摘要
-    revision.py       # 修订机制
-```
+- 遵循 `ruff`（`pyproject.toml`）：行宽 88；保持 import 分组与排序（标准库/三方/本地）。
+- 类型标注优先：新代码尽量完整标注参数与返回值；使用 `list[str]`/`dict[str, Any]`（Python 3.10+）。
+- 避免一口气大重构：除非用户明确要求，否则只做最小必要改动。
 
-## models.py 内必须定义
+## 3) Pydantic v2 与数据模型
 
-- Settings
-- WorldSetting
-- ThemeConflict
-- Character
-- CharactersConfig
-- Outline
-- ChapterPlan
-- ScenePlan
-- GeneratedScene
-均使用 Pydantic BaseModel。
+- 使用 Pydantic v2 API：`model_validate(...)`、`model_dump(...)`，不要写 v1 风格的 `parse_obj`/`.dict()`。
+- 结构化输出（JSON 资产）必须可被 schema 校验：新增/改字段时，同步更新对应 schema 与测试。
 
-## LangChain + LangGraph 代码规范
+## 4) I/O 与编码（防资产污染）
 
-### LangChain 链规范
-1. 所有链必须使用：
-    - ChatPromptTemplate
-    - LLMChain 或 RunnableSequence
-    - PydanticOutputParser 或 with_structured_output
-2. 所有提示必须包含：
-    - 「你的任务」
-    - 「输入说明」
-    - 「输出格式（JSON schema）」
-    - 「注意事项」
-3. 输出严格使用 JSON，不允许 Markdown 包裹 JSON。
-4. 使用 langchain 1.0+ 的版本的语法
+- 所有文件读写显式 `encoding="utf-8"`。
+- JSON 写入统一：`ensure_ascii=False`、`indent=2`；路径使用 `pathlib.Path`。
+- 不引入隐式副作用：不要在 import 时执行 I/O；写盘逻辑要可测、可回滚、可定位。
 
-### LangGraph 工作流规范
-1. 使用 StateGraph 定义工作流，包含节点和边的流转逻辑
-2. LangGraph 状态必须通过 Pydantic 模型定义
-3. 每个节点函数必须接收状态并返回更新后的状态
-4. 边的定义必须清晰，支持条件分支
-5. 必须添加工作流的可视化支持（使用 .draw() 方法）
-6. 使用 langgraph 1.0+ 的版本的语法
+## 5) 依赖与运行（uv 约束）
 
-## 项目运行
+- 依赖管理优先使用 `uv`（例如 `uv sync` / `uv add` / `uv run`）；避免手改锁文件导致漂移。
+- 非必要不新增依赖；如需新增，必须同时更新 `pyproject.toml` 与 `uv.lock`（以及必要时的 `requirements.txt`，按仓库现状保持一致）。
 
-1. 使用uv,不要直接使用系统默认的python
+## 6) 测试与回归
+
+- 改动涉及 `schemas`/`routing`/`plugins`：必须补/改对应 `pytest` 用例，保证契约与门禁逻辑可回归验证。

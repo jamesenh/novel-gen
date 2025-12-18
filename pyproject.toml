@@ -1,13 +1,18 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "novel-gen"
-version = "0.1.0"
-description = "基于 LangChain 的 AI 小说生成器"
+version = "2.0.0"
+description = "Workflow-first novel generation with agent plugins"
 readme = "README.md"
 requires-python = ">=3.10"
+license = {text = "MIT"}
 authors = [
-    {name = "Jamesenh", email = "jamesenh@example.com"},
+    {name = "Jamesenh"}
 ]
-keywords = ["novel", "generation", "ai", "langchain", "llm"]
+keywords = ["novel", "generation", "workflow", "langgraph"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -16,39 +21,47 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Topic :: Software Development :: Libraries :: Python Modules",
-    "Topic :: Artistic Software",
 ]
 dependencies = [
-    "langchain>=0.1.0",
-    "langchain-openai>=0.0.5",
-    "langchain-core>=0.1.0",
     "langgraph>=0.2.0",
-    "langgraph-checkpoint-sqlite>=2.0.0",
     "pydantic>=2.0.0",
-    "openai>=1.0.0",
     "python-dotenv>=1.0.0",
-    "chromadb>=1.3.4",
-    "mem0ai>=0.1.0",
-    "pytest>=9.0.1",
-    "typer>=0.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
 ]
 
 [project.scripts]
-ng = "novelgen.cli:app"
-
-[project.urls]
-Homepage = "https://github.com/jamesenh/novel-gen"
-Repository = "https://github.com/jamesenh/novel-gen"
-Issues = "https://github.com/jamesenh/novel-gen/issues"
-
-[build-system]
-requires = ["setuptools>=61.0", "wheel"]
-build-backend = "setuptools.build_meta"
+novel-gen = "app.main:main"
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["novelgen*"]
+include = ["app*"]
 
-[tool.setuptools.package-data]
-novelgen = ["*.json", "*.md"]
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
+fixable = ["ALL"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14.9",
+]
+

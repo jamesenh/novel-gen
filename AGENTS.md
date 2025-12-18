@@ -16,250 +16,51 @@ Use `@/openspec/AGENTS.md` to learn:
 Keep this managed block so 'openspec update' can refresh the instructions.
 <!-- OPENSPEC:END -->
 
-# NovelGen Project Guide
+# Novel-Gen 仓库工作约定（面向 AI 助手）
 
-## Project Overview
+本仓库是「长篇小说生成/迭代工作流」的项目资产与规范仓库；核心产物是可落盘、可检索、可回滚的结构化资产（world/characters/outline/chapters/audit/memory）。
 
-NovelGen is a sophisticated **Chinese AI novel generation system** built on LangChain and LangGraph. It automates the complete novel creation process through 6 structured steps: world-building → characters → themes → outline → chapter planning → scene generation. The project serves both as a practical tool for automated novel creation and as a learning platform for advanced LangChain architecture patterns.
+## 核心原则（默认遵守）
 
-**Key Capabilities:**
-- Complete end-to-end novel generation workflow
-- Structured JSON-based data exchange between steps using Pydantic models
-- LangGraph-based stateful workflow orchestration
-- Optional Mem0 intelligent memory layer for user preferences and entity state management
-- Vector storage with ChromaDB for semantic search and context retrieval
-- Consistency checking and revision systems
-- Checkpoint and resume functionality
+- **结构化优先**：设定/计划/审计尽量用 JSON（或强结构化表述），减少自然语言漂移。
+- **契约化输出**：关键 JSON 建议带 `schema_version`、`generated_at`、`generator`，并在写入项目前通过 schema 校验。
+- **最小改动**：修订优先“补过渡/补证据/改台词与动机”，避免整章推倒重写。
+- **回归门禁**：章节“进入下一章”的唯一条件是 `blocker == 0`（一致性审计通过）。
+- **编码正确**：文本与 JSON 一律 UTF-8，避免双重编码导致的乱码。
 
-## Technology Stack
+## 资产目录（以 `projects/` 为主）
 
-**Core Technologies:**
-- **Python 3.10+** with LangChain 1.0+ ecosystem
-- **LangGraph** for complex workflow orchestration
-- **OpenAI GPT models** (GPT-4, GPT-3.5-turbo) as primary LLM
-- **Pydantic 2.0+** for structured output validation
-- **ChromaDB** for vector storage and semantic search
-- **Mem0** for intelligent memory management (optional)
-- **uv** for modern Python package management
+- 项目资产根目录：`projects/<project_name>/`
+- 常见文件：
+  - `settings.json`（项目元信息）
+  - `world.json` / `characters.json` / `theme_conflict.json` / `outline.json`
+  - `chapters/`（`chapter_XXX_plan.json`、`chapter_XXX.json`、可选 `chapter_XXX_revised.txt`）
+  - `consistency_reports.json`（一致性审计问题与建议修复）
+  - `chapter_memory.json`、`data/novel.db`（记忆片段与实体快照；可选）
+  - `workflow_checkpoints.db`（断点续跑；可选）
 
-**Development Tools:**
-- **pytest** for testing framework
-- **OpenSpec** for spec-driven development and change management
-- **dotenv** for environment configuration
+## 修改资产时的同步要求（避免“正文变了但记忆没变”）
 
-## Project Architecture
+- 若修改章节正文/设定（world/characters/timeline/threads），同步更新：
+  - `projects/<project>/chapter_memory.json`
+  - `projects/<project>/consistency_reports.json`
+  - （如存在）`projects/<project>/data/novel.db` 中对应 `memory_chunks` / `entity_snapshots`
 
-```
-novelgen/
-├── novelgen/                 # Main package
-│   ├── config.py            # Configuration management
-│   ├── models.py            # Pydantic data models
-│   ├── llm.py               # LLM instance management
-│   ├── chains/              # LangChain generation chains
-│   │   ├── world_chain.py
-│   │   ├── characters_chain.py
-│   │   ├── outline_chain.py
-│   │   ├── scene_text_chain.py
-│   │   └── ...
-│   └── runtime/             # Runtime orchestration
-│       ├── workflow.py      # LangGraph workflow definition
-│       ├── nodes.py         # LangGraph node implementations
-│       ├── memory.py        # Memory management
-│       ├── consistency.py   # Consistency checking
-│       └── revision.py      # Chapter revision system
-├── projects/                # Generated novel projects
-├── tests/                   # Test suite
-├── openspec/               # OpenSpec configuration
-├── docs/                   # Documentation
-└── examples/               # Usage examples
-```
+## 变更与协作
 
-## Development Workflow
+- “系统怎么改 / 流程怎么变 / schema 变化”统一走 `openspec/`；必要时先写变更提案再实现。
+- 新增/修改结构化输出字段时，优先补充/更新 schema 与相关测试（如 `tests/test_schemas.py`、`tests/test_routing.py`）。
 
-### Novel Generation Pipeline
-1. **World Creation** - Generate detailed world setting from user description
-2. **Theme & Conflict** - Define core themes and conflicts
-3. **Character Generation** - Create protagonist, antagonist, and supporting characters
-4. **Outline Creation** - Generate story structure with chapter summaries
-5. **Chapter Planning** - Detailed scene-by-scene planning for each chapter
-6. **Scene Text Generation** - Generate actual novel text scene by scene
-7. **Consistency Checking** - Verify internal consistency and fix issues
-8. **Revision System** - Apply revisions based on consistency reports
+## 安全与仓库卫生
 
-### Key Design Principles
-- **Chain Independence**: Each generation step runs independently with JSON file communication
-- **Structured Outputs**: All data validated through Pydantic models
-- **Configuration-Driven**: Environment variables and config files for flexible deployment
-- **Memory Persistence**: SQLite for structured data, ChromaDB for vectors
-- **Error Recovery**: LLMJsonRepairOutputParser for automatic JSON format fixes
+- 不提交真实密钥：`.env` 仅本地使用，仓库中应使用示例文件（如 `.env.example`）。
+- 注意大文件：`projects/*/data/`（向量库/DB/graph）可能很大，新增或搬运前先确认策略。
 
-### Code Style Guidelines
+## 编码规范
 
-**File Headers:**
-- Each file must contain Chinese docstring explaining module functionality
-- Include author info and date (jamesenh, YYYY-MM-DD)
-
-**Naming Conventions:**
-- Functions/variables: English snake_case
-- Classes: PascalCase
-- Constants: UPPER_SNAKE_CASE
-
-**Import Order:**
-1. Standard library
-2. Third-party libraries
-3. Local modules (use absolute imports)
-
-**Comments:**
-- Complex logic requires Chinese comments
-- Complete function docstrings with Args, Returns, and functionality description
-
-## Build and Test Commands
-
-### Installation
-```bash
-# Using uv (recommended)
-uv sync
-
-# Using pip
-pip install -r requirements.txt
-```
-
-### Configuration
-```bash
-# Copy environment template
-cp .env.template .env
-
-# Edit .env with your OpenAI API key
-```
-
-### Running Novel Generation
-```bash
-# Full workflow using main.py
-python main.py
-
-# Using orchestrator directly
-python -m novelgen.runtime.orchestrator \
-  --project projects/demo_001 \
-  --steps world,characters,outline,chapters_plan,chapters
-
-# Export novel to text
-python main.py export_novel_cmd demo_001
-```
-
-### Testing
-```bash
-# Run all tests
-pytest
-
-# Run specific test file
-pytest tests/test_end_to_end.py
-
-# Run with verbose output
-pytest -v
-```
-
-### Memory Management
-```bash
-# Check memory health
-python scripts/memory_health_check.py
-
-# Reindex vectors
-python scripts/vector_reindex.py
-
-# Export memory data
-python scripts/export_memory.py
-```
-
-## Configuration Options
-
-### Environment Variables
-- **OPENAI_API_KEY**: Required for OpenAI API access
-- **OPENAI_MODEL_NAME**: Default model (gpt-4, gpt-3.5-turbo)
-- **TEMPERATURE**: Creativity level (0.0-2.0)
-- **MEM0_ENABLED**: Enable intelligent memory layer
-- **EMBEDDING_MODEL_NAME**: Vector embedding model
-- **Chain-specific configs**: Individual model settings per generation step
-
-### Project Settings (settings.json)
-```json
-{
-  "project_name": "demo_001",
-  "author": "Jamesenh",
-  "llm_model": "gpt-4",
-  "temperature": 0.7,
-  "persistence_enabled": true,
-  "vector_store_enabled": true,
-  "world_description": "小说世界观描述...",
-  "theme_description": "主题和冲突描述...",
-  "num_chapters": 5
-}
-```
-
-## Testing Strategy
-
-**Current Approach:**
-- Manual testing through demo projects (demo_001, demo_002)
-- End-to-end workflow validation
-- JSON format and Pydantic model validation
-- Content quality and consistency checks
-
-**Test Categories:**
-- **Unit tests**: Individual component testing
-- **Integration tests**: Full workflow validation
-- **State persistence tests**: Checkpoint and recovery
-- **Memory system tests**: Vector store integration
-
-**Focus Areas:**
-- JSON output format correctness
-- Pydantic model validation
-- Content coherence and consistency
-- Prompt execution effectiveness
-
-## Security Considerations
-
-**API Security:**
-- OpenAI API keys stored in environment variables
-- Support for different API endpoints and providers
-- Rate limiting and timeout configurations
-
-**Content Safety:**
-- Relies on OpenAI's content filtering
-- Chinese market focus with cultural adaptation
-- No direct content moderation controls
-
-**Data Handling:**
-- Local JSON file storage for generated content
-- No database or user authentication system
-- Vector storage uses local ChromaDB instance
-
-## Important Constraints
-
-**Technical Limitations:**
-- Complete dependency on OpenAI API availability
-- JSON format strictness required for pipeline success
-- No concurrent generation support
-- Memory usage can be high for long texts
-
-**Business Constraints:**
-- Chinese language focus only
-- AI-generated content cannot be copyrighted
-- Content quality varies with LLM randomness
-- Cost-sensitive due to GPT-4 pricing
-
-**System Constraints:**
-- Stateless design using JSON files
-- Single-user focused architecture
-- No built-in caching (except generation reuse)
-- Network dependency for API calls
-
-## OpenSpec Integration
-
-This project uses OpenSpec for spec-driven development. When making significant changes:
-
-1. **Check existing specs**: `openspec spec list --long`
-2. **List active changes**: `openspec list`
-3. **Create proposals** for new features, breaking changes, or architecture shifts
-4. **Follow three-stage workflow**: Create → Implement → Archive
-5. **Use Chinese language** for specs and documentation to match project conventions
-
-For detailed OpenSpec instructions, see `@/openspec/AGENTS.md`.
+- `docs/*.md`、用户可见说明：默认使用**中文**（术语可保留英文原名）。
+- Python 代码：标识符/变量/函数名用**英文**；不要用拼音命名。
+- Docstring：**必须**给公开模块/类/函数写 docstring；默认用**中文**。
+- 注释说明: 使用**中文**
+- 不新增花哨输出：CLI/日志避免新增 emoji 与装饰字符（保持可 grep/可解析）。
+- openspec中的change的内容描述文字使用**中文**
